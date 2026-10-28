@@ -1,0 +1,20 @@
+{
+  "name": "slimer-autocomplete-specs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline converter from Fig completion specs (withfig/autocomplete) to Slimer's data-only JSON format",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "convert": "node convert.mjs",
+    "validate": "node validate.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "esbuild": "0.28.2"
+  }
+}
