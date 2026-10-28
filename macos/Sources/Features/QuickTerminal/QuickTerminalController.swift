@@ -371,6 +371,20 @@ class QuickTerminalController: BaseTerminalController {
         }
     }
 
+    /// slimer: run a show/hide transition with the configured animation style,
+    /// duration and easing.
+    private func runDrawerAnimation(
+        _ animations: @escaping () -> Void,
+        completionHandler: @escaping () -> Void
+    ) {
+        let instant = derivedConfig.quickTerminalAnimation == .none
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = instant ? 0 : derivedConfig.quickTerminalAnimationDuration
+            context.timingFunction = derivedConfig.quickTerminalAnimationEasing.timingFunction
+            animations()
+        }, completionHandler: completionHandler)
+    }
+
     func animateIn() {
         guard let window = self.window else { return }
 
@@ -501,14 +515,33 @@ class QuickTerminalController: BaseTerminalController {
 
         // Run the animation that moves our window into the proper place and makes
         // it visible.
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = derivedConfig.quickTerminalAnimationDuration
-            context.timingFunction = .init(name: .easeIn)
-            position.setFinal(
-                in: window.animator(),
-                on: screen,
-                terminalSize: derivedConfig.quickTerminalSize,
-                closedFrame: closedFrame)
+        // slimer: honor quick-terminal-animation and -easing.
+        runDrawerAnimation({
+            switch self.derivedConfig.quickTerminalAnimation {
+            case .slide:
+                position.setFinal(
+                    in: window.animator(),
+                    on: screen,
+                    terminalSize: self.derivedConfig.quickTerminalSize,
+                    closedFrame: closedFrame)
+
+            case .fade:
+                // Jump to the final frame, then fade in place.
+                position.setFinal(
+                    in: window,
+                    on: screen,
+                    terminalSize: self.derivedConfig.quickTerminalSize,
+                    closedFrame: closedFrame)
+                window.alphaValue = 0
+                window.animator().alphaValue = 1
+
+            case .none:
+                position.setFinal(
+                    in: window,
+                    on: screen,
+                    terminalSize: self.derivedConfig.quickTerminalSize,
+                    closedFrame: closedFrame)
+            }
         }, completionHandler: {
             // There is a very minor delay here so waiting at least an event loop tick
             // keeps us safe from the view not being on the window.
@@ -624,14 +657,22 @@ class QuickTerminalController: BaseTerminalController {
         // and lets us render off screen.
         window.level = .popUpMenu
 
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = derivedConfig.quickTerminalAnimationDuration
-            context.timingFunction = .init(name: .easeIn)
-            position.setInitial(
-                in: window.animator(),
-                on: screen,
-                terminalSize: derivedConfig.quickTerminalSize,
-                closedFrame: window.frame)
+        // slimer: honor quick-terminal-animation and -easing.
+        runDrawerAnimation({
+            switch self.derivedConfig.quickTerminalAnimation {
+            case .slide:
+                position.setInitial(
+                    in: window.animator(),
+                    on: screen,
+                    terminalSize: self.derivedConfig.quickTerminalSize,
+                    closedFrame: window.frame)
+
+            case .fade:
+                window.animator().alphaValue = 0
+
+            case .none:
+                window.alphaValue = 0
+            }
         }, completionHandler: {
             // This causes the window to be removed from the screen list and macOS
             // handles what should be focused next.
@@ -783,6 +824,8 @@ class QuickTerminalController: BaseTerminalController {
         let backgroundOpacity: Double
         let backgroundBlur: Ghostty.Config.BackgroundBlur
         let quickTerminalTabBar: QuickTerminalTabBar // slimer
+        let quickTerminalAnimation: QuickTerminalAnimation // slimer
+        let quickTerminalAnimationEasing: QuickTerminalAnimationEasing // slimer
 
         init() {
             self.quickTerminalScreen = .main
@@ -793,6 +836,8 @@ class QuickTerminalController: BaseTerminalController {
             self.backgroundOpacity = 1.0
             self.backgroundBlur = .disabled
             self.quickTerminalTabBar = .auto // slimer
+            self.quickTerminalAnimation = .slide // slimer
+            self.quickTerminalAnimationEasing = .easeIn // slimer
         }
 
         init(_ config: Ghostty.Config) {
@@ -804,6 +849,8 @@ class QuickTerminalController: BaseTerminalController {
             self.backgroundOpacity = config.backgroundOpacity
             self.backgroundBlur = config.backgroundBlur
             self.quickTerminalTabBar = config.quickTerminalTabBar // slimer
+            self.quickTerminalAnimation = config.quickTerminalAnimation // slimer
+            self.quickTerminalAnimationEasing = config.quickTerminalAnimationEasing // slimer
         }
     }
 
