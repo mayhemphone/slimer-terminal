@@ -1,5 +1,6 @@
 import Foundation
 import Cocoa
+import Combine // slimer
 import SwiftUI
 import GhosttyKit
 
@@ -37,6 +38,13 @@ class QuickTerminalController: BaseTerminalController {
     /// For example, terminals executing custom scripts are not restorable.
     let restorable: Bool
     private var restorationState: QuickTerminalRestorableState?
+
+    // slimer: drawer tabs. `surfaceTree` is always the selected tab's tree; see
+    // QuickTerminalController+Tabs.swift for how tabs interact with the base class.
+    var tabs = QuickTerminalTabs<Ghostty.SurfaceView>()
+    let tabBarModel = QuickTerminalTabBarModel()
+    var isSwitchingTabs = false
+    var tabObservers: [UUID: AnyCancellable] = [:]
 
     init(_ ghostty: Ghostty.App,
          position: QuickTerminalPosition = .top,
@@ -91,6 +99,8 @@ class QuickTerminalController: BaseTerminalController {
             selector: #selector(windowDidResize(_:)),
             name: NSWindow.didResizeNotification,
             object: nil)
+
+        setupTabs() // slimer
     }
 
     required init?(coder: NSCoder) {
@@ -138,7 +148,10 @@ class QuickTerminalController: BaseTerminalController {
 
         // Setup our content
         window.contentView = TerminalViewContainer {
-            TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            // slimer: host the drawer tab bar above the splits.
+            QuickTerminalContentView(tabBar: tabBarModel) {
+                TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            }
         }
 
         // Clear out our frame at this point, the fixup from above is complete.
@@ -249,13 +262,14 @@ class QuickTerminalController: BaseTerminalController {
     // MARK: Base Controller Overrides
 
     override func focusSurface(_ view: Ghostty.SurfaceView) {
+        // slimer: the surface may live in a background tab; bring that tab forward
+        // first. This also rejects surfaces that aren't ours.
+        guard selectTab(containing: view) else { return }
         if visible {
             // If we're visible, we just focus the surface as normal.
             super.focusSurface(view)
             return
         }
-        // Check if target surface belongs to this quick terminal
-        guard surfaceTree.contains(view) else { return }
         // Set the target surface as focused
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: view)
@@ -266,6 +280,10 @@ class QuickTerminalController: BaseTerminalController {
 
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
+
+        // slimer: keep the selected tab in sync. An emptied tab that has a
+        // neighbor is replaced by it instead of hiding the drawer.
+        if tabsDidChangeSurfaceTree(to: to) { return }
 
         // If our surface tree is nil then we animate the window out. We
         // defer reinitializing the tree to save some memory here.
@@ -299,6 +317,12 @@ class QuickTerminalController: BaseTerminalController {
             return
         }
 
+        // slimer: with more than one tab, closing the last leaf closes this tab.
+        if tabs.count > 1, let tab = tabs.selected {
+            closeTab(tab, withConfirmation: withConfirmation)
+            return
+        }
+
         // If its the root, we check if the process exited. If it did,
         // then we do empty the tree.
         if surface.processExited {
@@ -319,6 +343,22 @@ class QuickTerminalController: BaseTerminalController {
         var config = config ?? Ghostty.SurfaceConfiguration()
         config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
         return super.newSplit(at: oldView, direction: direction, baseConfig: config)
+    }
+
+    // slimer: background tabs are owned by this controller too.
+    override func ownsSurface(_ view: Ghostty.SurfaceView) -> Bool {
+        tabs.contains(view)
+    }
+
+    // slimer: remember per-tab focus so switching back restores it.
+    override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
+        super.focusedSurfaceDidChange(to: to)
+        tabsFocusedSurfaceDidChange(to: to)
+    }
+
+    // slimer: the title override is per tab.
+    override var titleOverride: String? {
+        didSet { tabsTitleOverrideDidChange() }
     }
 
     // MARK: Methods
@@ -610,6 +650,9 @@ class QuickTerminalController: BaseTerminalController {
         // Change the collection behavior of the window depending on the configuration.
         window.collectionBehavior = derivedConfig.quickTerminalSpaceBehavior.collectionBehavior
 
+        // slimer: tab bar visibility and colors follow the config.
+        syncTabBar(config: ghostty.config, visibility: derivedConfig.quickTerminalTabBar)
+
         // If our window is not visible, then no need to sync the appearance yet.
         // Some APIs such as window blur have no effect unless the window is visible.
         guard window.isVisible else { return }
@@ -645,15 +688,6 @@ class QuickTerminalController: BaseTerminalController {
         return await super.confirmCloseAsync(messageText: messageText, informativeText: informativeText, confirmButtonTitle: confirmButtonTitle)
     }
 
-    private func showNoNewTabAlert() {
-        guard let window else { return }
-        let alert = NSAlert()
-        alert.messageText = "Cannot Create New Tab"
-        alert.informativeText = "Tabs aren't supported in the Quick Terminal."
-        alert.addButton(withTitle: "OK")
-        alert.alertStyle = .warning
-        alert.beginSheetModal(for: window)
-    }
     // MARK: First Responder
 
     @IBAction override func closeWindow(_ sender: Any) {
@@ -662,7 +696,8 @@ class QuickTerminalController: BaseTerminalController {
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        showNoNewTabAlert()
+        // slimer: the drawer supports tabs.
+        newTab()
     }
 
     @IBAction func toggleGhosttyFullScreen(_ sender: Any) {
@@ -732,10 +767,11 @@ class QuickTerminalController: BaseTerminalController {
 
     @objc private func onNewTab(notification: SwiftUI.Notification) {
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
-        guard let window = surfaceView.window else { return }
-        guard window.windowController is QuickTerminalController else { return }
-        // Tabs aren't supported with Quick Terminals or derivatives
-        showNoNewTabAlert()
+        // slimer: the drawer supports tabs. Inherit the config (e.g. working
+        // directory) from the requesting surface like a normal window does.
+        guard ownsSurface(surfaceView) else { return }
+        let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
+        newTab(baseConfig: configAny as? Ghostty.SurfaceConfiguration)
     }
 
     private struct DerivedConfig {
@@ -746,6 +782,7 @@ class QuickTerminalController: BaseTerminalController {
         let quickTerminalSize: QuickTerminalSize
         let backgroundOpacity: Double
         let backgroundBlur: Ghostty.Config.BackgroundBlur
+        let quickTerminalTabBar: QuickTerminalTabBar // slimer
 
         init() {
             self.quickTerminalScreen = .main
@@ -755,6 +792,7 @@ class QuickTerminalController: BaseTerminalController {
             self.quickTerminalSize = QuickTerminalSize()
             self.backgroundOpacity = 1.0
             self.backgroundBlur = .disabled
+            self.quickTerminalTabBar = .auto // slimer
         }
 
         init(_ config: Ghostty.Config) {
@@ -765,6 +803,7 @@ class QuickTerminalController: BaseTerminalController {
             self.quickTerminalSize = config.quickTerminalSize
             self.backgroundOpacity = config.backgroundOpacity
             self.backgroundBlur = config.backgroundBlur
+            self.quickTerminalTabBar = config.quickTerminalTabBar // slimer
         }
     }
 

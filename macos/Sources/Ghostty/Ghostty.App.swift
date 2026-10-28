@@ -970,7 +970,9 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 guard let appState = self.appState(fromView: surfaceView) else { return }
-                guard appState.config.windowDecorations else {
+                // slimer: drawer tabs don't depend on window decorations.
+                guard appState.config.windowDecorations
+                        || surfaceView.window?.windowController is QuickTerminalController else {
                     let alert = NSAlert()
                     alert.messageText = "Tabs are disabled"
                     alert.informativeText = "Enable window decorations to use tabs"
@@ -1275,7 +1277,7 @@ extension Ghostty {
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
 
                     // See gotoTab for notes on this check.
-                    guard (surfaceView.window?.tabGroup?.windows.count ?? 0) > 1 else { return false }
+                    guard (surfaceView.window?.slimerTabCount ?? 0) > 1 else { return false } // slimer: drawer tabs
 
                     NotificationCenter.default.post(
                         name: .ghosttyMoveTab,
@@ -1332,7 +1334,7 @@ extension Ghostty {
 
                     // Similar to goto_split (see comment there) about our performability,
                     // we should make this more accurate later.
-                    guard (surfaceView.window?.tabGroup?.windows.count ?? 0) > 1 else { return false }
+                    guard (surfaceView.window?.slimerTabCount ?? 0) > 1 else { return false } // slimer: drawer tabs
 
                     NotificationCenter.default.post(
                         name: Notification.ghosttyGotoTab,

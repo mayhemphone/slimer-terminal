@@ -246,19 +246,28 @@ class BaseTerminalController: NSWindowController,
     /// lifecycle operations must use tree ownership rather than that transient
     /// view relationship.
     static func controller(owning surface: Ghostty.SurfaceView) -> BaseTerminalController? {
+        // slimer: ownsSurface instead of surfaceTree.contains so controllers that
+        // hold surfaces outside the visible tree (quick terminal tabs) are found.
         if let controller = surfaceControllers.object(forKey: surface),
-           controller.surfaceTree.contains(surface) {
+           controller.ownsSurface(surface) {
             return controller
         }
 
         if let controller = surface.window?.windowController as? BaseTerminalController,
-           controller.surfaceTree.contains(surface) {
+           controller.ownsSurface(surface) {
             return controller
         }
 
         return NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
-            .first { $0.surfaceTree.contains(surface) }
+            .first { $0.ownsSurface(surface) }
+    }
+
+    /// slimer: Whether this controller owns the surface. Defaults to membership in
+    /// `surfaceTree`; subclasses that keep surfaces outside the visible tree
+    /// (quick terminal tabs) override this.
+    func ownsSurface(_ view: Ghostty.SurfaceView) -> Bool {
+        surfaceTree.contains(view)
     }
 
     private static func updateSurfaceControllers(
@@ -266,7 +275,8 @@ class BaseTerminalController: NSWindowController,
         from oldTree: SplitTree<Ghostty.SurfaceView>,
         to newTree: SplitTree<Ghostty.SurfaceView>
     ) {
-        for surface in oldTree where !newTree.contains(surface) {
+        // slimer: keep ownership for surfaces the controller still owns elsewhere.
+        for surface in oldTree where !newTree.contains(surface) && !controller.ownsSurface(surface) {
             if surfaceControllers.object(forKey: surface) === controller {
                 surfaceControllers.removeObject(forKey: surface)
             }
