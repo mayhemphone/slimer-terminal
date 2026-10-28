@@ -9,7 +9,10 @@ class QuickTerminalController: BaseTerminalController {
     override var windowNibName: NSNib.Name? { "QuickTerminal" }
 
     /// The position for the quick terminal.
-    let position: QuickTerminalPosition
+    private(set) var position: QuickTerminalPosition // slimer: mutable, see updatePosition
+
+    /// slimer: set to run the next show/hide transition with no animation.
+    private var suppressNextAnimation = false
 
     /// The current state of the quick terminal
     private(set) var visible: Bool = false
@@ -371,13 +374,35 @@ class QuickTerminalController: BaseTerminalController {
         }
     }
 
+    // slimer: adopt a new quick-terminal-position on config reload without a
+    // restart. A visible drawer is hidden instantly; the next toggle shows it
+    // at the new edge with the configured size for that axis.
+    func updatePosition(_ newPosition: QuickTerminalPosition) {
+        guard newPosition != position else { return }
+        if visible {
+            suppressNextAnimation = true
+            animateOut()
+            // animateOut skips the animation group when the window is on another
+            // space, so make sure the flag never leaks into the next show.
+            suppressNextAnimation = false
+        }
+        position = newPosition
+
+        // Cached per-screen frames were sized for the old axis.
+        screenStateCache.removeAll()
+        if let window {
+            position.setLoaded(window, size: derivedConfig.quickTerminalSize)
+        }
+    }
+
     /// slimer: run a show/hide transition with the configured animation style,
     /// duration and easing.
     private func runDrawerAnimation(
         _ animations: @escaping () -> Void,
         completionHandler: @escaping () -> Void
     ) {
-        let instant = derivedConfig.quickTerminalAnimation == .none
+        let instant = suppressNextAnimation || derivedConfig.quickTerminalAnimation == .none
+        suppressNextAnimation = false
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = instant ? 0 : derivedConfig.quickTerminalAnimationDuration
             context.timingFunction = derivedConfig.quickTerminalAnimationEasing.timingFunction

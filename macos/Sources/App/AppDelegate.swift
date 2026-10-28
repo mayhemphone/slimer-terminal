@@ -812,6 +812,11 @@ class AppDelegate: NSObject,
         // Update the config we need to store
         self.derivedConfig = DerivedConfig(config)
 
+        // slimer: adopt a changed quick-terminal-position without a restart.
+        if case .initialized(let controller) = quickTerminalControllerState {
+            controller.updatePosition(derivedConfig.quickTerminalPosition)
+        }
+
         // Depending on the "window-save-state" setting we have to set the NSQuitAlwaysKeepsWindows
         // configuration. This is the only way to carefully control whether macOS invokes the
         // state restoration system.
