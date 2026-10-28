@@ -1,0 +1,163 @@
+# slimer: release pipeline for the Slimer fork (macOS only for now).
+#
+# Triggered manually or by a tag `slimer-v*`. Builds GhosttyKit with Zig,
+# builds the app with Xcode, signs with Developer ID, notarizes, staples,
+# produces a DMG, and publishes a Sparkle appcast as a GitHub Release.
+#
+# Required repository secrets (see docs/slimer/RELEASE.md):
+#   MACOS_CERTIFICATE            base64 .p12 Developer ID Application cert
+#   MACOS_CERTIFICATE_PWD        password of the .p12
+#   MACOS_CERTIFICATE_NAME       e.g. "Developer ID Application: Name (TEAMID)"
+#   MACOS_CI_KEYCHAIN_PWD        any random string
+#   APPLE_NOTARIZATION_ISSUER    App Store Connect API issuer id
+#   APPLE_NOTARIZATION_KEY_ID    App Store Connect API key id
+#   APPLE_NOTARIZATION_KEY       contents of the .p8 key
+#   SPARKLE_KEY_PUB              Sparkle EdDSA public key (generate_keys)
+#   SPARKLE_KEY_PRIV             Sparkle EdDSA private key (generate_keys -x)
+name: slimer-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string, e.g. 0.1.0"
+        required: true
+  push:
+    tags: ["slimer-v*"]
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: 0.17.0
+  SPARKLE_VERSION: 2.9.6
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#slimer-v}"
+          fi
+          echo "SLIMER_VERSION=$V" >> "$GITHUB_ENV"
+          echo "SLIMER_BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          echo "SLIMER_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select --switch "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+
+      - name: Install Zig
+        run: |
+          curl -sSL "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
+          mkdir -p "$HOME/zig" && tar -xJf zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+          "$HOME/zig/zig" version
+
+      - name: Install Sparkle tools and nushell
+        run: |
+          mkdir -p .action/sparkle && cd .action/sparkle
+          curl -sSL "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-for-Swift-Package-Manager.zip" -o sparkle.zip
+          unzip -q sparkle.zip
+          echo "$(pwd)/bin" >> "$GITHUB_PATH"
+          brew install nushell
+
+      - name: Build GhosttyKit
+        run: zig build -Doptimize=ReleaseFast -Demit-macos-app=false -Dversion-string="${SLIMER_VERSION}"
+
+      - name: Build app
+        run: macos/build.nu --configuration Release
+
+      - name: Stamp Info.plist
+        env:
+          SPARKLE_KEY_PUB: ${{ secrets.SPARKLE_KEY_PUB }}
+        run: |
+          P="macos/build/Release/Ghostty.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${SLIMER_BUILD}" "$P"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${SLIMER_VERSION}" "$P"
+          /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_KEY_PUB}" "$P" || \
+            /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_KEY_PUB}" "$P"
+          /usr/libexec/PlistBuddy -c "Add :SlimerCommit string ${SLIMER_COMMIT}" "$P"
+
+      - name: Codesign
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.MACOS_CI_KEYCHAIN_PWD }}
+        run: |
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          rm certificate.p12
+          APP="macos/build/Release/Ghostty.app"
+          for t in \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+            "$APP/Contents/Frameworks/Sparkle.framework" \
+            "$APP/Contents/PlugIns/DockTilePlugin.plugin"; do
+            /usr/bin/codesign --verbose -f -s "$MACOS_CERTIFICATE_NAME" -o runtime "$t"
+          done
+          /usr/bin/codesign --verbose -f -s "$MACOS_CERTIFICATE_NAME" -o runtime --entitlements macos/Ghostty.entitlements "$APP"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Create DMG
+        env:
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        run: |
+          npm install --global create-dmg
+          create-dmg --identity="$MACOS_CERTIFICATE_NAME" ./macos/build/Release/Ghostty.app ./
+          mv ./Ghostty*.dmg "./Slimer-${SLIMER_VERSION}.dmg"
+
+      - name: Notarize and staple
+        env:
+          APPLE_NOTARIZATION_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+        run: |
+          echo "$APPLE_NOTARIZATION_KEY" > notarization_key.p8
+          xcrun notarytool store-credentials notarytool-profile --key notarization_key.p8 --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER"
+          rm notarization_key.p8
+          xcrun notarytool submit "Slimer-${SLIMER_VERSION}.dmg" --keychain-profile notarytool-profile --wait
+          xcrun stapler staple "Slimer-${SLIMER_VERSION}.dmg"
+          xcrun stapler staple macos/build/Release/Ghostty.app
+          spctl -a -vv -t install macos/build/Release/Ghostty.app
+
+      - name: Zip app for Sparkle
+        run: |
+          cd macos/build/Release && zip -9 -r --symlinks "../../../Slimer-${SLIMER_VERSION}.zip" Ghostty.app
+
+      - name: Generate appcast
+        env:
+          SPARKLE_KEY_PRIV: ${{ secrets.SPARKLE_KEY_PRIV }}
+        run: |
+          mkdir -p appcast && cp "Slimer-${SLIMER_VERSION}.zip" appcast/
+          DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/slimer-v${SLIMER_VERSION}"
+          generate_appcast --ed-key-file <(echo "$SPARKLE_KEY_PRIV") --download-url-prefix "${DL}/" appcast/
+          ls appcast
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: slimer-v${{ env.SLIMER_VERSION }}
+          name: Slimer ${{ env.SLIMER_VERSION }}
+          files: |
+            Slimer-${{ env.SLIMER_VERSION }}.dmg
+            Slimer-${{ env.SLIMER_VERSION }}.zip
+            appcast/appcast.xml
