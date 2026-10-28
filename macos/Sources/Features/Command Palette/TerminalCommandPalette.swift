@@ -80,6 +80,8 @@ struct TerminalCommandPaletteView: View {
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
         options.append(contentsOf: sortedTerminalPaletteOptions(jumpOptions + terminalOptions))
+        // slimer: workspace "Go to:", "Run:" and "Recent:" entries (pre-sorted: pinned, then frecency)
+        options.append(contentsOf: WorkspacePaletteOptions.options(for: surfaceView))
         return options
     }
 
