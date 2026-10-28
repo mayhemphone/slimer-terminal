@@ -27,6 +27,8 @@ def main [
         -scheme $scheme
         -configuration $configuration
         $"SYMROOT=($build_dir)"
+        # slimer: avoid a Keychain prompt hang while SwiftPM fetches Sparkle's binary artifact
+        -packageAuthorizationProvider netrc
         ...$skip_testing
         $action)
 }
