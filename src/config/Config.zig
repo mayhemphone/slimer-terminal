@@ -2744,9 +2744,6 @@ keybind: Keybinds = .{},
 ///   * `right` - Terminal appears at the right of the screen.
 ///   * `center` - Terminal appears at the center of the screen.
 ///
-/// On macOS, changing this configuration requires restarting Ghostty
-/// completely.
-///
 /// Note: There is no default keybind for toggling the quick terminal.
 /// To enable this feature, bind the `toggle_quick_terminal` action to a key.
 @"quick-terminal-position": QuickTerminalPosition = .top,
@@ -2846,6 +2843,63 @@ keybind: Keybinds = .{},
 ///
 /// Only implemented on macOS.
 @"quick-terminal-animation-duration": f64 = 0.2,
+
+/// slimer: The style of the quick terminal enter and exit animation.
+///
+/// Valid values are:
+///
+///   * `slide` - The terminal slides in from the edge of the screen it is
+///     positioned on (or scales in from the center for `center`). This is
+///     the default and matches the historical behavior.
+///
+///   * `fade` - The terminal fades in and out in place at its final
+///     position.
+///
+///   * `none` - The terminal appears and disappears instantly.
+///
+/// The duration of the animation is controlled by
+/// `quick-terminal-animation-duration`. This can be changed at runtime.
+///
+/// Only implemented on macOS.
+@"quick-terminal-animation": QuickTerminalAnimation = .slide,
+
+/// slimer: The easing curve of the quick terminal enter and exit animation.
+///
+/// Valid values are:
+///
+///   * `ease-in` - Starts slowly and accelerates. This is the default and
+///     matches the historical behavior.
+///
+///   * `ease-out` - Starts quickly and decelerates.
+///
+///   * `ease-in-out` - Starts and ends slowly.
+///
+///   * `linear` - Constant speed.
+///
+/// This has no effect when `quick-terminal-animation` is `none`. This can
+/// be changed at runtime.
+///
+/// Only implemented on macOS.
+@"quick-terminal-animation-easing": QuickTerminalAnimationEasing = .@"ease-in",
+
+/// slimer: Controls when the tab bar is shown in the quick terminal. The
+/// quick terminal supports tabs via the usual `new_tab`, `close_tab`,
+/// `previous_tab`, `next_tab`, `goto_tab` and `move_tab` actions.
+///
+/// Valid values are:
+///
+///   * `auto` - Show the tab bar only when there is more than one tab.
+///     This is the default.
+///
+///   * `always` - Always show the tab bar.
+///
+///   * `never` - Never show the tab bar. Tabs can still be created and
+///     switched with keybindings.
+///
+/// This can be changed at runtime.
+///
+/// Only implemented on macOS.
+@"quick-terminal-tab-bar": QuickTerminalTabBar = .auto,
 
 /// Automatically hide the quick terminal when focus shifts to another window.
 /// Set it to false for the quick terminal to remain open even when it loses focus.
@@ -9872,6 +9926,28 @@ pub const QuickTerminalScreen = enum {
 pub const QuickTerminalSpaceBehavior = enum {
     remain,
     move,
+};
+
+/// slimer: See quick-terminal-animation
+pub const QuickTerminalAnimation = enum {
+    slide,
+    fade,
+    none,
+};
+
+/// slimer: See quick-terminal-animation-easing
+pub const QuickTerminalAnimationEasing = enum {
+    @"ease-in",
+    @"ease-out",
+    @"ease-in-out",
+    linear,
+};
+
+/// slimer: See quick-terminal-tab-bar
+pub const QuickTerminalTabBar = enum {
+    auto,
+    always,
+    never,
 };
 
 /// See quick-terminal-keyboard-interactivity
