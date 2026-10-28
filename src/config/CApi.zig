@@ -4,6 +4,7 @@ const inputpkg = @import("../input.zig");
 const global = @import("../global.zig");
 const String = @import("../main_c.zig").String;
 
+const cli = @import("../cli.zig"); // slimer: for sliceIterator
 const Config = @import("Config.zig");
 const c_get = @import("c_get.zig");
 const edit = @import("edit.zig");
@@ -130,6 +131,32 @@ export fn ghostty_config_get_diagnostic(self: *Config, idx: u32) Diagnostic {
     if (idx >= items.len) return .{};
     const message = self._diagnostics.precompute.messages.items[idx];
     return .{ .message = message.ptr };
+}
+
+// slimer: Apply a single `key=value` argument to an in-memory config,
+// exactly as if that line appeared in a config file. This lets the apprt
+// derive per-surface configs (themes) without writing temporary files.
+// Returns false if the argument is rejected or produces a diagnostic.
+export fn ghostty_config_load_arg(self: *Config, arg: [*:0]const u8) bool {
+    return config_load_arg_(self, global.alloc(), std.mem.span(arg)) catch |err| {
+        log.warn("error loading config arg err={}", .{err});
+        return false;
+    };
+}
+
+// slimer: see ghostty_config_load_arg. The argument must be a single
+// `key=value` (or bare `key`) with no leading dashes and no newlines.
+fn config_load_arg_(self: *Config, alloc: std.mem.Allocator, arg: []const u8) !bool {
+    if (arg.len == 0 or arg[0] == '-') return false;
+    if (std.mem.indexOfAny(u8, arg, "\r\n\x00") != null) return false;
+
+    const full = try std.fmt.allocPrint(alloc, "--{s}", .{arg});
+    defer alloc.free(full);
+
+    const diags_before = self._diagnostics.items().len;
+    var iter = cli.args.sliceIterator(&.{full});
+    try self.loadIter(alloc, &iter);
+    return self._diagnostics.items().len == diags_before;
 }
 
 export fn ghostty_config_open_path() String {
@@ -277,4 +304,44 @@ test "ghostty_config_trigger: default keybind" {
         try testing.expectEqual(.physical, trigger.tag);
         try testing.expectEqual(.unidentified, trigger.key.physical);
     }
+}
+
+test "slimer: ghostty_config_load_arg applies a color" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expect(try config_load_arg_(&cfg, alloc, "background=#112233"));
+    try testing.expectEqual(@as(u8, 0x11), cfg.background.r);
+    try testing.expectEqual(@as(u8, 0x22), cfg.background.g);
+    try testing.expectEqual(@as(u8, 0x33), cfg.background.b);
+    try testing.expect(cfg._diagnostics.empty());
+
+    // Later args override earlier ones, like config file lines.
+    try testing.expect(try config_load_arg_(&cfg, alloc, "background=#445566"));
+    try testing.expectEqual(@as(u8, 0x44), cfg.background.r);
+}
+
+test "slimer: ghostty_config_load_arg rejects bad input" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // Newlines can never smuggle a second key.
+    const font_size_before = cfg.@"font-size";
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "background=#112233\nfont-size=99"));
+    try testing.expectEqual(font_size_before, cfg.@"font-size");
+
+    // Empty, dash-prefixed, and unknown keys are rejected.
+    try testing.expect(!try config_load_arg_(&cfg, alloc, ""));
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "--background=#112233"));
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "not-a-real-key=1"));
+
+    // Invalid values produce a diagnostic and return false.
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "background=notacolor"));
+    try testing.expect(!cfg._diagnostics.empty());
 }
