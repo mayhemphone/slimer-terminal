@@ -178,6 +178,11 @@ pub const Command = union(Key) {
     /// terminal supports the protocol. See `ProgramStatus`.
     program_status: ProgramStatus,
 
+    /// slimer: autocomplete buffer report (OSC 7704). The shell reports
+    /// its live command line for the autocomplete popup. See
+    /// `parsers/autocomplete_buffer.zig` for the wire format and caps.
+    autocomplete_buffer: AutocompleteBuffer,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
     pub const HierarchicalContext = parsers.hierarchical_context.Command;
 
@@ -188,6 +193,9 @@ pub const Command = union(Key) {
     pub const KittyDesktopNotification = parsers.kitty_desktop_notification.OSC;
 
     pub const ProgramStatus = parsers.program_status.Command;
+
+    // slimer: OSC 7704
+    pub const AutocompleteBuffer = parsers.autocomplete_buffer.Command;
 
     pub const Key = LibEnum(
         lib.target,
@@ -222,6 +230,7 @@ pub const Command = union(Key) {
             "kitty_desktop_notification",
             "unknown",
             "program_status",
+            "autocomplete_buffer", // slimer
         },
     );
 
@@ -469,6 +478,8 @@ pub const Parser = struct {
         @"750",
         @"7501",
         @"77",
+        @"770", // slimer
+        @"7704", // slimer
         @"99",
         @"104",
         @"105",
@@ -556,6 +567,7 @@ pub const Parser = struct {
             .hierarchical_context,
             .unknown,
             .program_status,
+            .autocomplete_buffer, // slimer
             => {},
         }
 
@@ -1015,7 +1027,21 @@ pub const Parser = struct {
             },
 
             .@"77" => switch (c) {
+                '0' => self.state = .@"770", // slimer
                 '7' => self.state = .@"777",
+                else => self.unknownOrInvalid(c),
+            },
+
+            // slimer: OSC 7704 autocomplete buffer. The body can exceed
+            // the fixed buffer (up to 8 KiB), so capture through the
+            // allocating path; the parser enforces its own cap.
+            .@"770" => switch (c) {
+                '4' => self.state = .@"7704",
+                else => self.unknownOrInvalid(c),
+            },
+
+            .@"7704" => switch (c) {
+                ';' => self.captureTrailing(.allocating),
                 else => self.unknownOrInvalid(c),
             },
 
@@ -1116,6 +1142,7 @@ pub const Parser = struct {
             .@"6",
             .@"75",
             .@"750",
+            .@"770", // slimer
             .@"77",
             => bridge: {
                 self.unknownOrInvalid(null);
@@ -1176,6 +1203,8 @@ pub const Parser = struct {
             .@"99" => parsers.kitty_desktop_notification.parse(self, terminator_ch),
 
             .@"7501" => parsers.program_status.parse(self, terminator_ch),
+
+            .@"7704" => parsers.autocomplete_buffer.parse(self, terminator_ch), // slimer
 
             .@"133" => parsers.semantic_prompt.parse(self, terminator_ch),
 

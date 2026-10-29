@@ -242,6 +242,7 @@ test {
     _ = @import("cli.zig");
     _ = @import("surface_mouse.zig");
     _ = @import("slimer/prompt.zig"); // slimer: idle prompt check tests
+    _ = @import("autocomplete/main.zig"); // slimer
 
     // Libraries
     _ = @import("tripwire.zig");

@@ -814,6 +814,7 @@ pub const Handler = struct {
             // Have no terminal-modifying effect
             .title_push,
             .title_pop,
+            .autocomplete_buffer, // slimer: consumed by the app surface only
             => {},
         }
     }

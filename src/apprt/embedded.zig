@@ -1915,6 +1915,55 @@ pub const CAPI = struct {
         return surface.core_surface.hasSelection();
     }
 
+    /// slimer: sync with ghostty_autocomplete_buffer_s in ghostty.h.
+    const AutocompleteBuffer = extern struct {
+        buffer: [*]const u8,
+        len: usize,
+        cursor: u32,
+        keymap: u8,
+        generation: u64,
+    };
+
+    /// slimer: snapshot the shell-reported command line. Returns false
+    /// when there is no live buffer (none received yet, dismissed, or
+    /// the command line was submitted); `out` is still filled so the
+    /// generation can be compared. `out.buffer` points at surface-owned
+    /// memory valid until the next update or dismiss on this surface.
+    /// Call on the main thread only.
+    export fn ghostty_surface_autocomplete_buffer(
+        surface: *Surface,
+        out: *AutocompleteBuffer,
+    ) bool {
+        const state = &surface.core_surface.autocomplete;
+        out.* = .{
+            .buffer = state.buffer.ptr,
+            .len = state.buffer.len,
+            .cursor = state.cursor,
+            .keymap = @backingInt(state.keymap),
+            .generation = state.generation,
+        };
+        return state.active;
+    }
+
+    /// slimer: send accepted completion text to the shell widget. The
+    /// text is validated and dropped (with a warning) if it contains
+    /// control characters, DEL, invalid UTF-8, C1 controls, U+2028/2029,
+    /// bidi overrides, or exceeds 4096 bytes. Never runs anything.
+    export fn ghostty_surface_autocomplete_accept(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.core_surface.autocompleteAccept(ptr[0..len]) catch |err| {
+            log.warn("autocomplete accept failed err={}", .{err});
+        };
+    }
+
+    /// slimer: clear the stored buffer and bump its generation.
+    export fn ghostty_surface_autocomplete_dismiss(surface: *Surface) void {
+        surface.core_surface.autocompleteDismiss();
+    }
+
     /// Same as ghostty_surface_read_text but reads from the user selection,
     /// if any.
     export fn ghostty_surface_read_selection(
