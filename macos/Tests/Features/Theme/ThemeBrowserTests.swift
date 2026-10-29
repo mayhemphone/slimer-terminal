@@ -70,17 +70,23 @@ struct ThemeMenuInstallTests {
     }
 
     @Test func browseShortcutIsControlCommandT() throws {
-        func event(_ chars: String, _ mods: NSEvent.ModifierFlags) throws -> NSEvent {
+        func event(_ chars: String, _ mods: NSEvent.ModifierFlags, keyCode: UInt16 = 17) throws -> NSEvent {
             try #require(NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0,
                 windowNumber: 0, context: nil, characters: chars,
-                charactersIgnoringModifiers: chars, isARepeat: false, keyCode: 17
+                charactersIgnoringModifiers: chars, isARepeat: false, keyCode: keyCode
             ))
         }
         #expect(ThemeMenu.isBrowseShortcut(try event("t", [.command, .control])))
         #expect(!ThemeMenu.isBrowseShortcut(try event("t", [.command])))
         #expect(!ThemeMenu.isBrowseShortcut(try event("t", [.command, .control, .shift])))
+        // Dvorak: the physical T key types "y"; ⌃⌘Y stays free.
         #expect(!ThemeMenu.isBrowseShortcut(try event("y", [.command, .control])))
+        // Dvorak's "t" is on another physical key and still matches.
+        #expect(ThemeMenu.isBrowseShortcut(try event("t", [.command, .control], keyCode: 40)))
+        // Russian: the physical T key types "е"; matched by key code.
+        #expect(ThemeMenu.isBrowseShortcut(try event("е", [.command, .control])))
+        #expect(!ThemeMenu.isBrowseShortcut(try event("к", [.command, .control], keyCode: 15)))
     }
 }
 
@@ -327,6 +333,32 @@ struct ThemeBrowserModelTests {
 
         model.setEntries(Array(entries.prefix(2)))
         #expect(model.selection == nil)
+    }
+
+    @Test func initialGhosttyRowIsSelectedOnceNamesLoad() {
+        let clock = ManualScheduler()
+        var previews: [ThemeBrowserModel.Entry.Kind] = []
+        // Opens with only None, Automatic and themes.json rows; the pin is a Ghostty name.
+        let model = ThemeBrowserModel(entries: Array(entries.prefix(4)), initial: .ghostty("Nord"),
+                                      scheduler: clock.scheduler)
+        model.onPreview = { previews.append($0) }
+        #expect(model.selection == nil)
+        model.setEntries(entries)
+        #expect(model.selection == .ghostty("Nord"))
+        #expect(model.selectedIndex == 5)
+        #expect(previews.isEmpty)
+        #expect(clock.count == 0)
+    }
+
+    @Test func lateNamesDontOverrideARowTheUserChose() {
+        let (model, _, log) = makeModel(initial: .ghostty("Nord"))
+        model.setEntries(Array(entries.prefix(4)))  // Nord not listed (yet)
+        #expect(model.selection == nil)
+        model.move(by: 1)
+        #expect(model.selection == ThemeBrowserModel.Entry.Kind.none)
+        model.setEntries(entries)
+        #expect(model.selection == ThemeBrowserModel.Entry.Kind.none)
+        #expect(log.previews == [ThemeBrowserModel.Entry.Kind.none])
     }
 
     @Test func browserRowsListThemesThenValidGhosttyNames() {

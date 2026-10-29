@@ -163,6 +163,12 @@ background queue; published state changes only on the main thread. Each write:
    per app run (removing and re-adding the block, e.g. with "Use value from my config",
    doesn't make more). Three backups are kept: **the oldest**, which is your config from
    before Slimer first edited it and is never rotated out, plus the newest two.
+   - Backup names use **UTC**, so they sort in time order after a time zone move or a DST
+     change. Older builds wrote local-time names; to keep those safe, the backup created
+     earliest on disk is also never pruned (so there can briefly be four).
+   - Only names that are exactly `<name>.slimer-backup-` + `YYYYMMDD-HHMMSS` count as
+     Slimer's backups. Anything else with that prefix (say `config.slimer-backup-keep`) is
+     yours and is never deleted.
 4. Writes a temp file in the same directory with the original mode, copies the original's
    extended attributes and ACL onto it (best effort), `F_FULLFSYNC`s it, re-checks that the
    target's device, inode, size and mtime still match the read (if not, nothing is written;
@@ -225,7 +231,8 @@ Application Support config.
 - `GlobalKeybindPlannerTests`: unbinding the user's old trigger, disable, round trip, reused
   triggers, bindings after the block.
 - `GhosttyConfigFileTests`: create, permissions and xattrs kept, timestamped backups (keep
-  the oldest and the newest two), symlink write-through, dangling symlink, read-only refusal, change detected
+  the oldest, the earliest created and the newest two; UTC names; look-alike names never
+  pruned), symlink write-through, dangling symlink, read-only refusal, change detected
   between read and rename, directory/FIFO/non-UTF-8 refusal, BOM on disk, end to end.
 - `SettingsConfigStoreTests`: validation, write + reload, one backup per added block, block
   removal, foreign block lines through edits, malformed block never written, hand edits

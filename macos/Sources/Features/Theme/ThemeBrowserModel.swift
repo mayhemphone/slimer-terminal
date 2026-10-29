@@ -77,10 +77,15 @@ final class ThemeBrowserModel {
     ) {
         self.entries = entries
         self.visible = entries
+        self.initial = initial
         self.interval = interval
         self.scheduler = scheduler
         self.selection = initial.flatMap { kind in entries.contains { $0.kind == kind } ? kind : nil }
     }
+
+    /// The row matching what the terminal had when the browser opened. Kept so it can be
+    /// selected once it appears (Ghostty theme names load after the browser opens).
+    let initial: Entry.Kind?
 
     var isFinished: Bool { outcome != nil }
 
@@ -93,12 +98,17 @@ final class ThemeBrowserModel {
     // MARK: Rows
 
     /// Replaces the rows (e.g. when the Ghostty theme list finishes loading), keeping the
-    /// query and, if it still exists, the selection.
+    /// query and, if it still exists, the selection. With nothing selected yet, the
+    /// ``initial`` row is selected if it is now listed, without a preview (the terminal is
+    /// already showing it).
     func setEntries(_ newEntries: [Entry]) {
         guard !isFinished else { return }
         entries = newEntries
         if let selection, !entries.contains(where: { $0.kind == selection }) {
             self.selection = nil
+        }
+        if selection == nil, lastPreviewed == nil, let initial, entries.contains(where: { $0.kind == initial }) {
+            selection = initial
         }
         refilter(selectFirstIfHidden: false)
     }

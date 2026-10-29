@@ -230,8 +230,12 @@ Settings ▸ Appearance; the directory scan runs in the background and is cached
   filtered out, the first match is selected and previewed.
 - **Enter** or a **double-click** keeps it: the row is pinned ("Automatic" removes the
   pin).
-- **Esc**, clicking outside, or opening another browser reverts the terminal to exactly
-  what it had (its pin, or what the rules pick).
+- **Esc**, **⌃⌘T again**, clicking outside, or opening another browser reverts the
+  terminal to exactly what it had (its pin, or what the rules pick).
+
+The row matching the terminal's current state is selected when the browser opens. For a
+terminal pinned to a Ghostty theme, that row appears once the background scan finishes; it
+is selected then (without a preview), unless you have already moved.
 
 A preview writes nothing (no themes.json, no pin, no config file). While it is shown,
 rules and pin changes don't touch that terminal; a config reload re-applies the preview.
@@ -247,13 +251,16 @@ model.
 Tests (`macos/Tests/Features/Theme/ThemeBrowserTests.swift`): View menu install (by action,
 localized title, title fallback, missing menu, idempotent), the ⌃⌘T match, pin
 decode/encode including the original format and rejected names, and the browser model
-(initial row not previewed, throttling to the latest row, clamping, filter, commit and
+(initial row not previewed, and selected once late-loading Ghostty names include it, throttling to the latest row, clamping, filter, commit and
 revert exactly once, rows from themes and theme names).
 
 **Why ⌃⌘T:** no default Ghostty keybind uses `ctrl+super+t` (`ghostty +list-keybinds
 --default`), and macOS doesn't reserve it. If you bind it yourself in the Ghostty config,
 your binding wins (the terminal handles bound keys before the menu). The key is answered
 by the menu delegate (`menuHasKeyEquivalent`), so pressing it doesn't rebuild the menu.
+It matches the key that types `t`; on a layout whose key types no ASCII letter (Russian,
+Greek, …) it matches the physical T key (`kVK_ANSI_T`) instead. The physical key is not
+used on Latin layouts, so ⌃⌘Y on Dvorak stays free.
 
 Command palette integration is not wired yet. The palette is owned by another feature.
 Entry points it can call: `ThemeController.shared.setExplicitTheme(_:for:)`,

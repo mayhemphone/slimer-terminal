@@ -90,11 +90,21 @@ enum ThemeMenu {
         menu.addItem(item)
     }
 
-    /// True if `event` is the "Browse Themes…" shortcut.
+    /// Physical key used when the layout doesn't type Latin letters (kVK_ANSI_T).
+    static let browseKeyCode: UInt16 = 0x11
+
+    /// True if `event` is the "Browse Themes…" shortcut: ⌃⌘ plus the key that types `t`,
+    /// or, on a layout whose key doesn't type an ASCII letter (Cyrillic, Greek, …), the
+    /// physical T key. Matching the physical key only then keeps ⌃⌘Y on Dvorak free.
     static func isBrowseShortcut(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return false }
         let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        return mods == browseKeyModifiers && event.charactersIgnoringModifiers?.lowercased() == browseKeyEquivalent
+        guard mods == browseKeyModifiers else { return false }
+        let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if chars == browseKeyEquivalent { return true }
+        let typesASCIILetter = chars.unicodeScalars.count == 1
+            && chars.unicodeScalars.allSatisfy { $0.isASCII && CharacterSet.letters.contains($0) }
+        return !typesASCIILetter && event.keyCode == browseKeyCode
     }
 
     /// Appends the theme and accent submenus for the tab owned by `window`. Removes any
@@ -183,6 +193,11 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
     }
 
     @objc private func browseKeySurface(_ sender: Any?) {
+        // Pressed again while the browser has focus: close it (reverting), like Esc.
+        if ThemeBrowser.shared.isOpen {
+            ThemeBrowser.shared.close()
+            return
+        }
         guard let surface = keySurface else {
             NSSound.beep()
             return

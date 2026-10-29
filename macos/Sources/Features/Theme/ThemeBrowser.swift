@@ -81,6 +81,9 @@ final class ThemeBrowser: NSObject {
         loadGhosttyNames()
     }
 
+    /// True while a browser popover is open.
+    var isOpen: Bool { session != nil }
+
     /// Reverts and closes the open browser, if any.
     func close() {
         guard let session else { return }
@@ -191,7 +194,7 @@ final class ThemeBrowserViewController: NSViewController, NSSearchFieldDelegate,
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
+        let root = ThemeBrowserRootView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
 
         searchField.placeholderString = "Filter themes"
         searchField.delegate = self
@@ -335,6 +338,16 @@ final class ThemeBrowserViewController: NSViewController, NSSearchFieldDelegate,
         guard model.visible.indices.contains(row) else { return }
         model.select(model.visible[row].kind)
         model.commit()
+    }
+}
+
+/// The popover's root view. ⌃⌘T while the popover has focus closes it (reverting) instead
+/// of reaching the main menu with no terminal focused.
+private final class ThemeBrowserRootView: NSView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard ThemeMenu.isBrowseShortcut(event) else { return super.performKeyEquivalent(with: event) }
+        ThemeBrowser.shared.close()
+        return true
     }
 }
 
