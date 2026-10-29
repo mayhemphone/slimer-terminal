@@ -5,12 +5,13 @@ capture (shell to terminal), routing and gating in the core, the apprt
 action and C API, and acceptance (terminal to shell). Phase 6C added the
 suggestion engine, the popup UI, and fixes from a security review of 6A.
 
-It is on by default in Slimer (`autocomplete = true`; upstream-style
-opt-in features default off, this one is a deliberate fork default). That
-adds the `autocomplete` shell-integration feature, so
-`GHOSTTY_SHELL_FEATURES` contains `autocomplete`. The feature can also be
-listed explicitly in `shell-integration-features`. zsh only for now (zsh
-5.3 or newer).
+It is on by default in Slimer (upstream-style opt-in features default
+off; this one is a deliberate fork default): the `autocomplete`
+shell-integration feature defaults on, so `GHOSTTY_SHELL_FEATURES`
+contains `autocomplete`. Either `autocomplete = false` or an explicit
+`no-autocomplete` in `shell-integration-features` turns it off, and with
+it the shell reports and history recording. zsh (5.3 or newer) and
+PowerShell (see `src/shell-integration/powershell/`).
 
 Config:
 
@@ -18,12 +19,12 @@ Config:
 |---|---|---|
 | `autocomplete` | `true` | Turn the popup and the shell reports on or off |
 | `autocomplete-max-items` | `8` | Rows shown, clamped to 1-8 |
-| `autocomplete-enter` | `accept` | `accept`: Enter inserts the selection (never runs it). `passthrough`: Enter goes to the shell |
+| `autocomplete-enter` | `navigated` | `navigated`: Enter runs the command unless you moved the selection (Warp-like). `accept`: Enter inserts the selected or top row (never runs it). `passthrough`: Enter always goes to the shell |
 
 ## Capture: OSC 7704 (shell to terminal)
 
 ```
-ESC ] 7704 ; v=1 ; n=<SECRET> ; p=<PGID> ; [d=1 ;] c=<CURSOR> ; k=<KEYMAP> ; t=<0|1> ; b=<payload> BEL
+ESC ] 7704 ; v=1 ; n=<SECRET> ; p=<PGID> ; [i=1 ;] [d=1 ; [h=<0|1> ;]] c=<CURSOR> ; k=<KEYMAP> ; t=<0|1> ; b=<payload> BEL
 ```
 
 Written without the spaces. The fields are:
@@ -33,7 +34,9 @@ Written without the spaces. The fields are:
 | `v` | protocol version | must be `1`, otherwise the report is dropped |
 | `n` | per-surface secret | hex, at most 64 chars. The core drops reports whose secret doesn't match (see the gate) |
 | `p` | the shell's process group (`$$`) | decimal. Compared with the pty foreground group before accepting |
-| `d` | `1`: the shell left the line editor (zle `line-finish`) | optional, `0` or `1` |
+| `i` | `1`: first report after zle `line-init` (a new line starts) | optional, `0` or `1` |
+| `d` | `1`: the shell left the line editor (zle `line-finish`, or the history hook) | optional, `0` or `1` |
+| `h` | with `d=1`: history verdict from `zshaddhistory`. `1`: `b` is the full command line to record; `0`: record nothing | optional |
 | `c` | zle `$CURSOR`, a character index | decimal digits only, fits in u32 |
 | `k` | keymap | `[A-Za-z0-9_-]{1,16}`. The shell maps `main` to `emacs` or `viins` (resolved at each prompt) and sends `other` for anything else |
 | `t` | `1` if the shell truncated the buffer | `0` or `1` |
@@ -47,7 +50,12 @@ before encoding and then sets `t=1`. The decoder accepts either hex case.
 The shell sends a report from a `line-pre-redraw` zle hook (installed
 with `add-zle-hook-widget`), but only when `$BUFFER`, `$CURSOR` or
 `$KEYMAP` changed since the last report. The cache is reset at each
-prompt. A `line-finish` hook sends a `d=1` report. Reports go to the
+prompt. A `line-init` hook marks the next report `i=1`; a `line-finish`
+hook sends a `d=1` report; a `zshaddhistory` hook sends `d=1;h=1` with
+the full command line (all physical lines of a multi-line command), or
+`d=1;h=0` when the line must not be recorded: a leading space, a match
+of `HISTORY_IGNORE`, or no `HISTFILE` (`fc -p` incognito). The hook
+always returns 0, so zsh's own history is unaffected. Reports go to the
 integration's tty fd.
 
 Parser (`src/terminal/osc/parsers/autocomplete_buffer.zig`):
@@ -68,9 +76,14 @@ Parser (`src/terminal/osc/parsers/autocomplete_buffer.zig`):
 
 ## The secret
 
-Each surface generates a 128-bit random secret (32 lowercase hex chars)
-when the `autocomplete` shell feature is on and passes it to the shell
-as `SLIMER_AUTOCOMPLETE_TOKEN`. The zsh integration copies it into a
+Each surface generates a 128-bit secret (32 lowercase hex chars) from
+the OS's secure random source (`randomSecure`) when the `autocomplete`
+shell feature is on; if that source fails, no secret is made and
+autocomplete stays off for the surface (fail closed). The secret is passed
+as `SLIMER_AUTOCOMPLETE_TOKEN` only to shells that use it: when the zsh
+integration is actually injected, or when the command is PowerShell
+(`pwsh`, `powershell`), which loads the Slimer module from its profile.
+Every other shell's environment never contains it. The zsh integration copies it into a
 non-exported global and unsets the variable the moment it is sourced, so
 child processes never inherit it. Every report carries it as `n=`; the
 core compares it in constant time and drops reports without it. This is
@@ -82,9 +95,8 @@ can read the secret (from the shell's memory, or the environment of a
 shell started before the integration ran) and forge reports. Such code
 can type into the terminal directly anyway.
 
-Shells other than zsh don't run the integration and so never unset the
-variable; children of those shells inherit it. They also never report,
-so the popup never shows there.
+A manually sourced zsh integration (`shell-integration = none` plus
+sourcing the script yourself) gets no secret and never reports.
 
 ## Routing and the gate (IO thread)
 
@@ -99,8 +111,12 @@ report is forwarded only if all of these hold:
    (`Screen.semantic_prompt.seen`).
 3. **Prompt-input state**: after OSC 133 B and before 133 C
    (`Screen.cursor.semantic_content == .input`).
-4. **Rate limit**: at most 200 reports per surface in a fixed one-second
+4. **Line not ended**: after a `d=1` report the gate refuses reports
+   until the next line starts (OSC 133 A or B, or a report with `i=1`).
+5. **Rate limit**: at most 200 reports per surface in a fixed one-second
    window.
+
+The first report forwarded after a line start is marked `line_start`.
 
 A forwarded report is copied once into an `autocomplete.Update` and the
 surface takes ownership of the buffer (`State.take`). The surface bumps
@@ -114,8 +130,19 @@ The state ends (and the action is emitted so the popup hides):
 - on a `d=1` report from zle `line-finish` (accepted, interrupted, or
   handed to `edit-command-line`'s editor),
 - synchronously in the key path when a key the user types encodes CR, LF,
-  ^C, ^D or ^Z, so Enter-then-Tab typed fast can't accept into the
-  command that just started.
+  ^C, ^D or ^Z, and when a `text:` binding, `ghostty_surface_text` or an
+  unbracketed paste contains CR or LF, so Enter-then-Tab typed fast can't
+  accept into the command that just started.
+
+Ending the line also sets a "line ended" latch on the surface: reports
+still in flight for the old line are ignored until a `line_start` report
+arrives, which also drops a stashed line that never reached 133 C (for
+example after ^C).
+
+History recording at 133 C uses, in order: the line from `d=1;h=1` (the
+shell's full command line), nothing after `d=1;h=0`, else the last
+reported buffer stashed on Enter/line-finish (PowerShell, or shells
+without the hook).
 
 Not implemented from PLAN.md 6a: the screen cross-check (compare the
 last 64 bytes before the cursor with the screen row). The secret makes it
@@ -176,8 +203,29 @@ In the shell, `_ghostty_ac_accept` (7705) and `_ghostty_ac_accept_line`
 ## Suggestion engine (`src/autocomplete/`)
 
 Portable Zig, no apprt or macOS APIs. One `Engine` is shared by every
-surface (specs, history and caches are process-wide); queries run on the
-main thread.
+surface (specs, history and caches are process-wide) and is owned by the
+**worker thread** (`Worker.zig`): queries, history loading/recording and
+all filesystem reads run there, never on the main thread.
+
+Query flow: the app calls `ghostty_surface_autocomplete_query` on the
+main thread. If the worker has delivered a result for the current
+generation it is copied out; otherwise a query is queued (once per
+generation; a newer query replaces one from the same surface that hasn't
+started) and `pending` is set. When the worker finishes, it hands the
+result to the surface through the app mailbox; the surface keeps it only
+if its generation is still current and emits `autocomplete_update` again,
+and the app reads it. Stale results are dropped.
+
+Filesystem safety: files (package.json, Makefile, packed-refs, HEAD,
+config, history files) are opened `O_NONBLOCK` and must be regular files
+(`fstat`), so a FIFO can't block. Directory listings and generators skip
+non-local and automounted filesystems (`statfs` without `MNT_LOCAL` or
+with `MNT_AUTOMOUNTED`; anything under `/net`, `/Network`, `/Volumes` must
+prove it is local). Listings don't `stat` symlinks; only links among the
+final shown items are resolved (one `stat` each). packed-refs is read up
+to 8 MB and only complete lines are parsed. package.json and Makefile
+results are reused past the 1 s cache while the file's mtime is
+unchanged.
 
 | File | Role |
 |---|---|
@@ -189,6 +237,8 @@ main thread.
 | `History.zig` | `history.log` store plus one-time (per process) import of `~/.zsh_history` (plain and EXTENDED_HISTORY, metafied bytes, multi-line entries). In-memory cap 10k entries. Line stats and per-command word stats (count, last use, cwd). |
 | `Rank.zig` | Score = match quality (exact prefix > case-insensitive prefix > fuzzy) + spec priority + spec order + generator hint + history frequency + recency (one-week decay) + cwd affinity. Fuzzy (subsequence, anchored at the first character) only for subcommands and options. |
 | `glue.zig` | Lazy shared engine, C result layout, history recording. |
+
+Candidates whose text equals the current token are dropped.
 
 Sources by position:
 
@@ -203,7 +253,9 @@ Sources by position:
 History: `history.log` lives in the data directory the app passes to
 `ghostty_autocomplete_set_paths` (macOS: `$XDG_DATA_HOME/slimer`, default
 `~/.local/share/slimer`; a temporary directory under XCTest). It is
-created with mode 0600 and only appended to. One entry per line:
+created with mode 0600 and written with `O_APPEND`; at load, a log with
+more than 10k entries is rewritten (temp file + rename) to keep the
+newest 10k. One entry per line:
 `<unix seconds>;<percent-encoded cwd>;<percent-encoded command>`. A line
 is recorded at OSC 133 C: the line stashed when the user pressed Enter
 (or zle `line-finish` fired), else the live buffer. Lines starting with a
@@ -221,9 +273,11 @@ against `index.json`); generate that list when the corpus lands.
 
 Performance (Apple Silicon, warm caches, a mix of 8 command lines
 including a 2000-line history scan and a 200-file directory, 1000
-queries): about **85 µs/query in ReleaseFast** and about 1 ms/query in
-Debug. The test `autocomplete engine: query latency with warm caches`
-asserts 1000 queries < 2 s in Debug.
+queries): about **91 µs/query in ReleaseFast** and about 1 ms/query in
+Debug, all on the worker thread. The test `autocomplete engine: query
+latency with warm caches` only asserts a very generous bound (< 30 s)
+because wall-clock limits flake on a loaded machine; measure in
+ReleaseFast for real numbers.
 
 ## C API
 
@@ -231,7 +285,7 @@ asserts 1000 queries < 2 s in Debug.
 GHOSTTY_ACTION_AUTOCOMPLETE_UPDATE   // ghostty_action_autocomplete_update_s { uint64_t generation; }
 
 bool ghostty_surface_autocomplete_buffer(ghostty_surface_t, ghostty_autocomplete_buffer_s*);
-bool ghostty_surface_autocomplete_query(ghostty_surface_t, ghostty_autocomplete_result_s*);
+bool ghostty_surface_autocomplete_query(ghostty_surface_t, ghostty_autocomplete_result_s*);  // never blocks
 bool ghostty_surface_autocomplete_accept(ghostty_surface_t, uint64_t generation, const char*, uintptr_t);
 bool ghostty_surface_autocomplete_accept_line(ghostty_surface_t, uint64_t generation, const char*, uintptr_t);
 void ghostty_surface_autocomplete_dismiss(ghostty_surface_t);
@@ -246,8 +300,9 @@ void ghostty_autocomplete_set_paths(const char* data_dir, uintptr_t, const char*
 - `_query` fills up to `GHOSTTY_AUTOCOMPLETE_MAX_ITEMS` (8) items
   `{ text, display, description (+ lengths, not NUL-terminated), kind,
   dangerous, match_len }` plus `replace_start`/`replace_len` (characters),
-  `replace_cols` (cells) and `generation`. Strings are surface-owned
-  until the next query. `kind` is a `ghostty_autocomplete_kind_e`
+  `replace_cols` (cells), `generation` and `pending` (no result yet: keep
+  the popup and wait for the next update). Strings are surface-owned
+  until the next autocomplete update. `kind` is a `ghostty_autocomplete_kind_e`
   (SUBCOMMAND, OPTION, ARG, PATH, HISTORY, GENERATOR); HISTORY items
   replace the whole line.
 - `_dismiss` clears the state and bumps the generation without emitting
@@ -276,15 +331,48 @@ with the `SurfaceView` as the object. GTK ignores the action silently.
   least one suggestion would change the current token (or line, for
   history). Hidden on focus loss, scroll, resize, and whenever the core
   ends the state (command start, prompt marks, alternate screen).
-- Keys, only while visible (`SurfaceView_AppKit.swift` `keyDown` and
-  `performKeyEquivalent` ask the controller first): Tab/Down/Ctrl-N next,
-  Shift-Tab/Up/Ctrl-P previous, Esc dismisses (stays hidden until the
-  buffer changes), Enter accepts when `autocomplete-enter = accept` and
-  a row is selected (it does not run the command), Right arrow at the end
-  of the line accepts. Dangerous items are never pre-selected; if every
-  item is dangerous nothing is selected and Enter goes to the shell.
-  When hidden, every key flows exactly as before. Accepting never
-  synthesizes Enter.
+- Keys (Warp-like). Nothing is selected until the user navigates.
+  `SurfaceView_AppKit.swift` `keyDown` and `performKeyEquivalent` ask
+  the controller first:
+  - Down / Ctrl-N next, Up / Ctrl-P / Shift-Tab previous (this is
+    "navigation"; it resets whenever the line changes).
+  - Tab, or Right at the end of the line: insert the row the user
+    navigated to, else the top row. The top row is the first one that is
+    neither dangerous nor a whole-line history entry; if there is none,
+    Tab goes to the shell.
+  - Enter (`autocomplete-enter = navigated`, the default): insert the
+    navigated row; without navigation Enter runs the command as typed and
+    the popup hides. `accept`: insert the navigated or top row.
+    `passthrough`: always run.
+  - Esc hides the popup until the buffer changes. In vi keymaps (`viins`,
+    `vicmd`) it also passes through to the shell.
+  - While an input method is composing (marked text), every key goes to
+    the IME and the popup hides.
+  - An empty token (right after a space) doesn't open the popup by
+    itself; Tab opens it when suggestions are waiting.
+  - When hidden, every other key flows exactly as before. Accepting never
+    synthesizes Enter. If the line changed and its result hasn't arrived
+    yet, accept keys pass through instead of inserting a stale row.
+- History rows use a clock icon and show the whole line, truncated in the
+  middle so its end stays visible.
+
+## Upstream merge hotspots
+
+Edits to upstream files that are most likely to conflict:
+
+- `src/termio/stream_handler.zig`: one call at the top of
+  `semanticPrompt` (`autocompleteSemanticPrompt`), one line in each of the
+  three alternate-screen mode cases, the `autocomplete_buffer` action
+  dispatch, and the gate field. Upstream's 133 case list is untouched.
+- `src/termio/shell_integration.zig` tests: `.autocomplete = false` added
+  to four `setupFeatures` struct literals (the feature now defaults on).
+- `src/termio/Exec.zig`: the secret is removed from the child env unless
+  zsh is injected or the command is PowerShell.
+- `src/Surface.zig`: key path (`endsLine`), `text:` binding and paste
+  (`submitsLine`), init (secret), deinit (cancel), and the message
+  handlers.
+- `src/config/Config.zig` `finalize`: `autocomplete` and the feature are
+  ANDed.
 
 ## Tests
 
@@ -304,13 +392,16 @@ with the `SurfaceView` as the object. GTK ignores the action silently.
 - `zig build test -Dtest-filter="setup features"`: `GHOSTTY_SHELL_FEATURES`
   carries `autocomplete`.
 - `macos/build.nu --action test`: `AutocompleteModelTests` (sanitizing,
-  bold-prefix splitting, selection, visibility, key mapping, C result
-  conversion, data directory).
+  bold-prefix splitting, top-row choice, selection, visibility incl. the
+  empty token, Enter/Tab/Right/Esc/IME-free key mapping in every Enter
+  mode and vi keymaps, C result conversion, data directory).
 - `zsh -f test/slimer/zsh-autocomplete.zsh src/shell-integration/zsh/ghostty-integration [emacs|vi]`:
   drives a real interactive zsh through `zpty`. It checks that the secret
   is removed from the environment and carried in reports, the emitted
   OSC, token replacement, quoting, rejection of an encoded newline, a
   zero-width space and a non-hex payload, fd redirections kept, `~/` kept
-  raw, line accept (prefix only), the `d=1` report on line-finish,
+  raw, line accept (prefix only), the `d=1` report on line-finish ending
+  in a real BEL, `i=1` on the first report of a line, the history hook
+  (`h=0` without `HISTFILE` or for `HISTORY_IGNORE`, `h=1` with the line),
   dedupe on redraw, and that nothing runs before Enter. Keep payloads
   small: `zpty -wn` silently loses writes over about 1 KB.
