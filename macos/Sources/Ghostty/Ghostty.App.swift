@@ -164,6 +164,12 @@ extension Ghostty {
         func reloadConfig(surface: ghostty_surface_t, soft: Bool = false) {
             // Soft updates just call with our existing config
             if soft {
+                // slimer: keep the surface's theme (e.g. on a light/dark color scheme change)
+                if let themed = ThemeController.shared.themedConfig(forSurface: surface, base: config),
+                   let cfg = themed.config {
+                    ghostty_surface_update_config(surface, cfg)
+                    return
+                }
                 ghostty_surface_update_config(surface, config.config!)
                 return
             }
@@ -177,6 +183,12 @@ extension Ghostty {
                 return
             }
 
+            // slimer: re-layer the surface's theme on the freshly loaded config
+            if let themed = ThemeController.shared.themedConfig(forSurface: surface, base: newConfig),
+               let cfg = themed.config {
+                ghostty_surface_update_config(surface, cfg)
+                return
+            }
             ghostty_surface_update_config(surface, newConfig.config!)
         }
 
