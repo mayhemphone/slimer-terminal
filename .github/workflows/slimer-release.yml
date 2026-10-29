@@ -153,7 +153,7 @@ jobs:
           ls appcast
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: slimer-v${{ env.SLIMER_VERSION }}
           name: Slimer ${{ env.SLIMER_VERSION }}
