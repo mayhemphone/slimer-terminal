@@ -28,43 +28,43 @@ while zpty -rt Z out 2>/dev/null; do buf+=$out; done
 
 typeset km=emacs; [[ $mode == vi ]] && km=viins
 
+# Read everything zsh prints until the pty has been quiet for ~0.5s.
+drain() { buf=; local idle=0 o; while (( idle < 5 )); do if zpty -rt Z o 2>/dev/null; then buf+=$o; idle=0; else (( idle++ )); sleep 0.1; fi; done }
+
 # Type a buffer with a ; and a % and check the OSC.
 zpty -wn Z 'echo 50%; git sta'
-sleep 0.5
-buf=; while zpty -rt Z out 2>/dev/null; do buf+=$out; done
-check "emit on change" "$buf" $'\e]7704;v=1;c=17;k='$km';t=0;b=echo 50%25%3B git sta\a'
+drain
+check "emit on change" "$buf" $'\e]7704;v=1;c=17;k='$km$';t=0;b=echo 50%25%3B git sta\a'
 
 # Accept: replace the token "sta" with "status".
 zpty -wn Z $'\e[7705~status\a'
-sleep 0.5
-buf=; while zpty -rt Z out 2>/dev/null; do buf+=$out; done
+drain
 check "accept replaces token" "$buf" $'b=echo 50%25%3B git status\a'
 check "accept moves cursor"  "$buf" $'c=20;k='$km
 
 # Accept text needing quotes: a filename with a space and a ;.
 zpty -wn Z $' \e[7705~my file%3B.txt\a'
-sleep 0.5
-buf=; while zpty -rt Z out 2>/dev/null; do buf+=$out; done
+drain
 check "accept quotes unsafe text" "$buf" 'git status my\ file\%3B.txt'
 
 # A control byte smuggled through the encoding is rejected by the widget.
 zpty -wn Z $'\e[7705~x%0Arm\a'
-sleep 0.5
-buf=; while zpty -rt Z out 2>/dev/null; do buf+=$out; done
+drain
 [[ $buf != *'xrm'* && $buf != *$'\nrm'* ]] && { (( pass++ )); print "PASS reject encoded newline"; } || { (( fail++ )); print "FAIL reject encoded newline"; print -r -- "  ${(q+)buf}"; }
 
 # Nothing was executed: clear the line (Ctrl-U) and run a marker command.
 zpty -wn Z $'\x15'
 zpty -w Z 'print -r MARK-$((6*7))'
-sleep 0.5
-buf=; while zpty -rt Z out 2>/dev/null; do buf+=$out; done
+drain
 check "line was never executed before Enter" "$buf" 'MARK-42'
 [[ $buf != *'command not found'* ]] && { (( pass++ )); print "PASS no stray execution"; } || { (( fail++ )); print "FAIL stray execution"; }
 
-# No re-emit when nothing changed: a redraw with the same state.
+# No re-emit when nothing changed: the first redraw at the fresh prompt may
+# report the new (empty) state once; a second identical redraw must not.
 zpty -wn Z $'\x0c'
-sleep 0.4
-buf=; while zpty -rt Z out 2>/dev/null; do buf+=$out; done
+drain
+zpty -wn Z $'\x0c'
+drain
 [[ $buf != *$'\e]7704'* ]] && { (( pass++ )); print "PASS dedupe on redraw"; } || { (( fail++ )); print "FAIL dedupe on redraw"; print -r -- "  ${(q+)buf}"; }
 
 zpty -d Z
