@@ -87,7 +87,7 @@ struct LocationsEditor: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 List(selection: $selection) {
-                    ForEach(store.document.locations) { location in
+                    ForEach(store.document.visibleLocations) { location in
                         Label {
                             Text(location.name)
                         } icon: {
@@ -97,7 +97,7 @@ struct LocationsEditor: View {
                         .tag(location.id)
                     }
                     .onMove { source, destination in
-                        store.edit { $0.locations.move(fromOffsets: source, toOffset: destination) }
+                        store.edit { $0.moveVisibleLocations(fromOffsets: source, toOffset: destination) }
                     }
                 }
                 .frame(width: 220)
@@ -121,11 +121,9 @@ struct LocationsEditor: View {
                 LocationForm(location: location, document: store.document) { updated in
                     store.edit { doc in
                         guard let idx = doc.locations.firstIndex(where: { $0.id == updated.id }) else { return }
-                        // Keep usage stats from the (possibly newer) document.
-                        var merged = updated
-                        merged.useCount = doc.locations[idx].useCount
-                        merged.lastUsed = doc.locations[idx].lastUsed
-                        doc.locations[idx] = merged
+                        // Only the edited fields; other OS paths and unknown keys stay as in the
+                        // (possibly newer) document.
+                        doc.locations[idx].applyEdits(from: updated)
                     }
                 }
                 .id(location.id)
@@ -155,7 +153,7 @@ struct LocationForm: View {
         Form {
             TextField("Name", text: $draft.name)
             HStack {
-                TextField("Path", text: $draft.path)
+                TextField("Path", text: $draft.editablePath)
                 Button("Choose…", action: chooseFolder)
             }
             if !pathIsValid {
@@ -198,8 +196,8 @@ struct LocationForm: View {
     }
 
     private var pathIsValid: Bool {
-        let expanded = WorkspacePath.expand(draft.path.trimmingCharacters(in: .whitespaces))
-        return expanded.hasPrefix("/") && isCleanText(draft.path)
+        let expanded = WorkspacePath.expand(draft.editablePath.trimmingCharacters(in: .whitespaces))
+        return expanded.hasPrefix("/") && isCleanText(draft.editablePath)
     }
 
     private var isValid: Bool {
@@ -216,9 +214,9 @@ struct LocationForm: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: WorkspacePath.expand(draft.path))
+        panel.directoryURL = URL(fileURLWithPath: WorkspacePath.expand(draft.editablePath))
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        draft.path = WorkspacePath.abbreviate(url.path)
+        draft.editablePath = WorkspacePath.abbreviate(url.path)
         if draft.name == "New Location" { draft.name = url.lastPathComponent }
     }
 }
@@ -239,7 +237,7 @@ struct CommandsEditor: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 List(selection: $selection) {
-                    ForEach(store.document.commands) { command in
+                    ForEach(store.document.visibleCommands) { command in
                         HStack {
                             Text(command.name)
                             Spacer()
@@ -250,7 +248,7 @@ struct CommandsEditor: View {
                         .tag(command.id)
                     }
                     .onMove { source, destination in
-                        store.edit { $0.commands.move(fromOffsets: source, toOffset: destination) }
+                        store.edit { $0.moveVisibleCommands(fromOffsets: source, toOffset: destination) }
                     }
                 }
                 .frame(width: 220)
@@ -274,10 +272,7 @@ struct CommandsEditor: View {
                 CommandForm(command: command, document: store.document) { updated in
                     store.edit { doc in
                         guard let idx = doc.commands.firstIndex(where: { $0.id == updated.id }) else { return }
-                        var merged = updated
-                        merged.useCount = doc.commands[idx].useCount
-                        merged.lastUsed = doc.commands[idx].lastUsed
-                        doc.commands[idx] = merged
+                        doc.commands[idx].applyEdits(from: updated)
                     }
                 }
                 .id(command.id)
@@ -311,8 +306,8 @@ struct CommandForm: View {
                 Text("The command contains control or invisible characters.").font(.caption).foregroundColor(.red)
             }
             TextField("Run in", text: Binding(
-                get: { draft.cwd ?? "" },
-                set: { draft.cwd = $0.isEmpty ? nil : $0 }
+                get: { draft.editableCwd ?? "" },
+                set: { draft.editableCwd = $0.isEmpty ? nil : $0 }
             ), prompt: Text("optional directory"))
             Toggle("Pinned", isOn: $draft.pinned)
             LabeledContent("Shortcut") {
@@ -341,7 +336,7 @@ struct CommandForm: View {
             && WorkspaceShell.isSafeToInsert(draft.command)
             && !draft.name.trimmingCharacters(in: .whitespaces).isEmpty
             && isCleanText(draft.name)
-            && (draft.cwd.map { isCleanText($0) && WorkspacePath.expand($0).hasPrefix("/") } ?? true)
+            && (draft.editableCwd.map { isCleanText($0) && WorkspacePath.expand($0).hasPrefix("/") } ?? true)
     }
 }
 
@@ -353,7 +348,7 @@ struct RecentEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             List {
-                ForEach(store.document.rankedRecent(), id: \.path) { recent in
+                ForEach(store.rankedRecent(), id: \.path) { recent in
                     HStack {
                         VStack(alignment: .leading) {
                             Text(WorkspacePath.abbreviate(recent.path))
@@ -366,23 +361,23 @@ struct RecentEditor: View {
                             Text("Location").font(.caption).foregroundColor(.secondary)
                         } else {
                             Button("Promote to Location") { promote(recent) }
+                                .disabled(!store.acceptsEdits)
                         }
                     }
                 }
             }
             HStack {
                 Spacer()
-                Button("Clear Recent") {
-                    store.edit { $0.recent.removeAll() }
-                }
-                .disabled(store.document.recent.isEmpty)
+                // Recent directories are per machine (recent.json), so clearing works even
+                // when workspace.json can't be edited.
+                Button("Clear Recent") { store.clearRecent() }
+                    .disabled(store.recent.recent.isEmpty)
             }
         }
-        .disabled(!store.acceptsEdits)
     }
 
     private func isLocation(_ path: String) -> Bool {
-        store.document.locations.contains { $0.expandedPath == path }
+        store.document.visibleLocations.contains { $0.expandedPath == path }
     }
 
     private func promote(_ recent: WorkspaceRecentDirectory) {

@@ -14,7 +14,6 @@ enum WorkspacePaletteOptions {
         store: WorkspaceStore = .shared
     ) -> [CommandOption] {
         let now = Date()
-        let document = store.document
         var options: [CommandOption] = []
 
         // Only shortcuts that the menu actually registers are shown.
@@ -24,7 +23,8 @@ enum WorkspacePaletteOptions {
         }
 
         // Go to: <name> (path)
-        for location in document.rankedLocations(now: now) {
+        let locations = store.rankedLocations(now: now)
+        for location in locations {
             let detail = WorkspaceDisplay.locationDetail(location)
             let title = WorkspaceDisplay.locationTitle(location)
             let symbols = WorkspaceShortcut.accepted(location.shortcut, log: false, isBound: isBound)?.symbols
@@ -56,9 +56,9 @@ enum WorkspacePaletteOptions {
         }
 
         // Run: <name>
-        for command in document.rankedCommands(now: now) {
+        for command in store.rankedCommands(now: now) {
             var subtitle = command.command
-            if let cwd = command.cwd, !cwd.isEmpty {
+            if let cwd = command.currentCwd {
                 subtitle += "  (in \(WorkspacePath.abbreviate(WorkspacePath.expand(cwd))))"
             }
             let symbols = WorkspaceShortcut.accepted(command.shortcut, log: false, isBound: isBound)?.symbols
@@ -80,8 +80,8 @@ enum WorkspacePaletteOptions {
         // Recent: <path> (skip directories that already are locations).
         // Learned from the shell, so these always open in a new tab and are
         // never typed into a terminal.
-        let locationPaths = Set(document.locations.map(\.expandedPath))
-        let recents = document.rankedRecent(now: now)
+        let locationPaths = Set(locations.map(\.expandedPath))
+        let recents = store.rankedRecent(now: now)
             .filter { !locationPaths.contains($0.path) }
             .prefix(recentLimit)
         for recent in recents {
