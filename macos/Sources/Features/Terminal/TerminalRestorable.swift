@@ -76,6 +76,9 @@ final class TerminalRestorableState: TerminalRestorable {
     var titleOverride: String? {
         internalState.titleOverride
     }
+    var tabAccentHex: String? { // slimer:
+        internalState.tabAccentHex
+    }
 
     /// Internal State we use to perform unit tests
     ///
@@ -167,6 +170,7 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         if let tabColor = state.tabColor {
             (window as? TerminalWindow)?.tabColor = tabColor
         }
+        (window as? TerminalWindow)?.tabAccentHex = state.tabAccentHex // slimer:
 
         // Restore the tab title override
         c.titleOverride = state.titleOverride

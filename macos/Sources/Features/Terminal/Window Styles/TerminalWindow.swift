@@ -27,7 +27,7 @@ class TerminalWindow: NSWindow {
 
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {
-        let view = NSHostingView(rootView: TabColorIndicatorView(tabColor: tabColor))
+        let view = NSHostingView(rootView: TabColorIndicatorView(color: effectiveTabAccentColor))
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
@@ -64,9 +64,34 @@ class TerminalWindow: NSWindow {
     var tabColor: TerminalTabColor = .none {
         didSet {
             guard tabColor != oldValue else { return }
-            tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
+            tabColorIndicator.rootView = TabColorIndicatorView(color: effectiveTabAccentColor) // slimer:
             invalidateRestorableState()
         }
+    }
+
+    // slimer: Accent derived from the focused surface's theme. Not persisted; the
+    // ThemeController re-derives it from the surface's (persisted) theme assignment.
+    var themeAccentColor: NSColor? {
+        didSet {
+            guard themeAccentColor != oldValue else { return }
+            tabColorIndicator.rootView = TabColorIndicatorView(color: effectiveTabAccentColor)
+        }
+    }
+
+    // slimer: Per-tab custom accent (`#RRGGBB`), persisted like `tabColor`.
+    var tabAccentHex: String? {
+        didSet {
+            guard tabAccentHex != oldValue else { return }
+            tabColorIndicator.rootView = TabColorIndicatorView(color: effectiveTabAccentColor)
+            invalidateRestorableState()
+        }
+    }
+
+    // slimer: Precedence: upstream palette color > custom hex > surface theme accent.
+    var effectiveTabAccentColor: NSColor? {
+        tabColor.displayColor
+            ?? tabAccentHex.flatMap { NSColor(strictHex: $0) }
+            ?? themeAccentColor
     }
 
     // MARK: NSWindow Overrides
@@ -159,7 +184,7 @@ class TerminalWindow: NSWindow {
         // Setup the accessory view for tabs that shows our keyboard shortcuts,
         // zoomed state, etc. Note I tried to use SwiftUI here but ran into issues
         // where buttons were not clickable on macOS 15.
-        tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
+        tabColorIndicator.rootView = TabColorIndicatorView(color: effectiveTabAccentColor) // slimer:
 
         let stackView = NSStackView()
         stackView.orientation = .horizontal
@@ -736,11 +761,11 @@ extension TerminalWindow {
 /// A small circle indicator displayed in the tab accessory view that shows
 /// the user-assigned tab color. When no color is set, the view is hidden.
 private struct TabColorIndicatorView: View {
-    /// The tab color to display.
-    let tabColor: TerminalTabColor
+    /// The accent color to display (slimer: any NSColor, see `effectiveTabAccentColor`).
+    let color: NSColor?
 
     var body: some View {
-        if let color = tabColor.displayColor {
+        if let color {
             Circle()
                 .fill(Color(color))
                 .frame(width: 6, height: 6)
@@ -836,6 +861,9 @@ extension TerminalWindow {
             (target?.window as? TerminalWindow)?.tabColor = color
         }
         menu.addItem(paletteItem)
+
+        // slimer: per-surface theme and custom tab accent
+        ThemeMenu.appendTabContextItems(to: menu, window: target?.window as? TerminalWindow)
     }
 }
 
