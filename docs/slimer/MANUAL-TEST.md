@@ -95,6 +95,18 @@ Open a normal window and split it into 8 terminals of uneven sizes (mix Cmd+D an
 - [ ] Recording a global hotkey that is a common shortcut (Cmd+C) is refused.
 - [ ] Advanced shows the managed block, any config errors, and the backup file.
 
+## Shortcut sheet
+
+- [ ] Hold Control alone for 2 seconds over a terminal window: the sheet fades in centered, with menu groups, Global/Keybinds, and "In the terminal". Releasing Control fades it out.
+- [ ] Same over the drawer (quick terminal).
+- [ ] Ctrl-C, Ctrl-R, Ctrl-A typed at normal speed and held never show the sheet, and the terminal gets every key without delay.
+- [ ] Holding Control, then pressing Shift (or any key, or clicking) cancels it; it doesn't come back until Control is released and held again.
+- [ ] While shown: pressing a key, clicking, or Cmd-Tab away hides it. Typing still reaches the terminal (the sheet never takes focus).
+- [ ] Items that are disabled right now (e.g. Close Tab with one tab, Paste with an empty clipboard) look dimmed.
+- [ ] Light and dark appearance both look right; a small window wraps into columns and shows "and N more" when needed.
+- [ ] Settings ▸ General ▸ Shortcut Sheet: switching to Command or Off, and changing the delay, take effect without a restart.
+- [ ] A keybind added to the config (e.g. `keybind = cmd+ctrl+e=equalize_splits`) appears under Keybinds after reloading the config. A `global:` bind shows a Global badge.
+
 ## Release build
 
 - [ ] `macos/build.nu --configuration Release` app launches. Compare launch time and typing feel with stock Ghostty.

@@ -181,6 +181,68 @@ fn config_load_arg_(self: *Config, alloc: std.mem.Allocator, arg: []const u8) !b
     return self._diagnostics.items().len == diags_before;
 }
 
+// slimer: read-only keybind enumeration for the shortcut overlay
+// (docs/slimer/SHORTCUTS.md). Sync with ghostty_config_keybind_s.
+const Keybind = extern struct {
+    trigger: inputpkg.Binding.Trigger.C = .{},
+    flags: inputpkg.Binding.Flags.C = 0,
+};
+
+// slimer: the number of top-level keybind entries. Valid indexes for
+// ghostty_config_keybind_at are 0 ..< count.
+export fn ghostty_config_keybind_count(self: *Config) usize {
+    return self.keybind.set.bindings.count();
+}
+
+// slimer: read one top-level keybind. Writes the trigger and flags to `out`
+// and the action (in config syntax, e.g. `goto_split:left`) to `buf` as a
+// NUL-terminated string, truncated to fit. Returns false for an index out of
+// range, a sequence leader (`a>b`), or a null or zero-length buffer. Chained bindings
+// report their first action. Nothing in the config is modified.
+export fn ghostty_config_keybind_at(
+    self: *Config,
+    index: usize,
+    out: *Keybind,
+    buf: ?[*]u8,
+    buf_len: usize,
+) bool {
+    const ptr = buf orelse return false;
+    return config_keybind_at_(self, index, out, ptr[0..buf_len]);
+}
+
+fn config_keybind_at_(
+    self: *const Config,
+    index: usize,
+    out: *Keybind,
+    buf: []u8,
+) bool {
+    if (buf.len == 0) return false;
+    buf[0] = 0;
+    const set = &self.keybind.set;
+    if (index >= set.bindings.count()) return false;
+    const trigger = set.bindings.keys()[index];
+    const action: inputpkg.Binding.Action, const flags = switch (set.bindings.values()[index]) {
+        .leader => return false,
+        .leaf => |leaf| .{ leaf.action, leaf.flags },
+        .leaf_chained => |leaf| leaf: {
+            if (leaf.actions.items.len == 0) return false;
+            break :leaf .{ leaf.actions.items[0], leaf.flags };
+        },
+    };
+
+    // Truncation is fine: the text is only ever displayed.
+    var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
+    switch (action) {
+        // Internal action whose value can't be formatted.
+        .cursor_key => writer.writeAll(@tagName(action)) catch {},
+        else => writer.print("{f}", .{action}) catch {},
+    }
+    buf[writer.end] = 0;
+
+    out.* = .{ .trigger = trigger.cval(), .flags = flags.cval() };
+    return true;
+}
+
 export fn ghostty_config_open_path() String {
     const path = edit.openPath(global.alloc()) catch |err| {
         log.err("error opening config in editor err={}", .{err});
@@ -380,4 +442,104 @@ test "slimer: ghostty_config_load_arg rejects bad input" {
     // Invalid values produce a diagnostic and return false.
     try testing.expect(!try config_load_arg_(&cfg, alloc, "background=notacolor"));
     try testing.expect(!cfg._diagnostics.empty());
+}
+
+test "slimer: ghostty_config_keybind_at enumerates bindings" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it = cli.args.sliceIterator(&.{
+        "--keybind=clear",
+        "--keybind=global:cmd+backquote=toggle_quick_terminal",
+        "--keybind=ctrl+a>n=new_tab",
+        "--keybind=cmd+shift+e=equalize_splits",
+        "--keybind=chain=goto_split:left",
+        "--keybind=ctrl+t=text:hello world",
+    });
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    const count = ghostty_config_keybind_count(&cfg);
+    try testing.expectEqual(@as(usize, 4), count);
+
+    var buf: [64]u8 = undefined;
+    var out: Keybind = .{};
+    var found_global = false;
+    var found_chain = false;
+    var found_text = false;
+    var leaders: usize = 0;
+    for (0..count) |i| {
+        if (!ghostty_config_keybind_at(&cfg, i, &out, &buf, buf.len)) {
+            leaders += 1;
+            continue;
+        }
+        const action = std.mem.sliceTo(&buf, 0);
+        if (std.mem.eql(u8, action, "toggle_quick_terminal")) {
+            found_global = true;
+            try testing.expect((inputpkg.Binding.Flags{ .global = true }).cval() & out.flags != 0);
+            try testing.expectEqual(.physical, out.trigger.tag);
+            try testing.expectEqual(inputpkg.Key.backquote, out.trigger.key.physical);
+            try testing.expect(out.trigger.mods.super);
+        } else if (std.mem.eql(u8, action, "equalize_splits")) {
+            // A chained binding reports its first action.
+            found_chain = true;
+            try testing.expect(out.trigger.mods.shift);
+            try testing.expect(out.trigger.mods.super);
+        } else if (std.mem.eql(u8, action, "text:hello world")) {
+            found_text = true;
+            try testing.expect(out.trigger.mods.ctrl);
+        } else {
+            return error.UnexpectedAction;
+        }
+    }
+    try testing.expect(found_global and found_chain and found_text);
+    // `ctrl+a>n` is a sequence: its leader is skipped.
+    try testing.expectEqual(@as(usize, 1), leaders);
+
+    // Out of range, empty and null buffers are refused.
+    try testing.expect(!ghostty_config_keybind_at(&cfg, count, &out, &buf, buf.len));
+    try testing.expect(!ghostty_config_keybind_at(&cfg, 0, &out, &buf, 0));
+    try testing.expect(!ghostty_config_keybind_at(&cfg, 0, &out, null, 64));
+}
+
+test "slimer: ghostty_config_keybind_at truncates the action" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it = cli.args.sliceIterator(&.{
+        "--keybind=clear",
+        "--keybind=ctrl+t=text:0123456789abcdef",
+    });
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    var buf: [8]u8 = undefined;
+    var out: Keybind = .{};
+    try testing.expect(ghostty_config_keybind_at(&cfg, 0, &out, &buf, buf.len));
+    try testing.expectEqualStrings("text:01", std.mem.sliceTo(&buf, 0));
+}
+
+test "slimer: ghostty_config_keybind_at covers the defaults" {
+    const testing = std.testing;
+
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    try cfg.finalize();
+
+    // Every default binding formats without crashing, and the split
+    // navigation bindings that have no menu item are present.
+    var buf: [128]u8 = undefined;
+    var out: Keybind = .{};
+    var saw_goto_split = false;
+    for (0..ghostty_config_keybind_count(&cfg)) |i| {
+        if (!ghostty_config_keybind_at(&cfg, i, &out, &buf, buf.len)) continue;
+        const action = std.mem.sliceTo(&buf, 0);
+        try testing.expect(action.len > 0);
+        if (std.mem.startsWith(u8, action, "goto_split:")) saw_goto_split = true;
+    }
+    try testing.expect(saw_goto_split);
 }

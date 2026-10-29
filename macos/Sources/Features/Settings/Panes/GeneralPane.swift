@@ -60,6 +60,8 @@ struct GeneralPane: View {
                 }
             }
 
+            ShortcutOverlaySettingsSection(store: store) // slimer: shortcut sheet
+
             Section("Windows") {
                 ConfigToggle(store: store, title: "New windows and tabs inherit the working directory",
                              key: "window-inherit-working-directory", fallback: true)

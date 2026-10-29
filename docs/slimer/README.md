@@ -36,6 +36,7 @@ Requires Zig 0.17, Xcode 26+ with the Metal Toolchain component (`xcodebuild -do
 | [CLAUDE-LAUNCHER.md](CLAUDE-LAUNCHER.md) | Starting Claude Code |
 | [AUTOCOMPLETE.md](AUTOCOMPLETE.md) | Autocomplete protocol, engine, popup, security model |
 | [SETTINGS.md](SETTINGS.md) | Settings window and how it edits the Ghostty config |
+| [SHORTCUTS.md](SHORTCUTS.md) | Hold-to-show shortcut sheet |
 | [RELEASE.md](RELEASE.md) | Signing, notarization, Sparkle, CI secrets |
 | [WINDOWS.md](WINDOWS.md) | Windows porting guide (PowerShell integration is untested) |
 

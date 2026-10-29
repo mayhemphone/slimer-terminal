@@ -22,6 +22,8 @@ enum SettingsKeySpec: Equatable {
         // General
         ("window-inherit-working-directory", .bool),
         ("confirm-close-surface", .enumeration(["true", "false", "always"])),
+        ("slimer-shortcut-overlay", .enumeration(["ctrl", "cmd", "option", "off"])),
+        ("slimer-shortcut-overlay-delay", .enumeration(["500ms", "1s", "1500ms", "2s", "3s", "5s"])),
         // Drawer
         ("quick-terminal-position", .enumeration(["top", "bottom", "left", "right", "center"])),
         ("quick-terminal-size", .quickTerminalSize),

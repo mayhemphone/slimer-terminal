@@ -556,6 +556,12 @@ typedef struct {
   size_t len;
 } ghostty_config_command_list_s;
 
+// slimer: one top-level keybind, see ghostty_config_keybind_at.
+typedef struct {
+  ghostty_input_trigger_s trigger;
+  uint8_t flags;  // ghostty_binding_flags_e bits
+} ghostty_config_keybind_s;
+
 // config.Palette
 typedef struct {
   ghostty_config_color_s colors[256];
@@ -1232,6 +1238,14 @@ GHOSTTY_API ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t,
 GHOSTTY_API ghostty_string_s ghostty_config_open_path(void);
 // slimer: apply one color `key=value` argument (allowlisted keys only, see CApi.zig).
 GHOSTTY_API bool ghostty_config_load_arg(ghostty_config_t, const char*);
+// slimer: read-only keybind enumeration (shortcut overlay, see CApi.zig).
+// ghostty_config_keybind_at returns false for a NULL or zero-length buffer.
+GHOSTTY_API uintptr_t ghostty_config_keybind_count(ghostty_config_t);
+GHOSTTY_API bool ghostty_config_keybind_at(ghostty_config_t,
+                                           uintptr_t,
+                                           ghostty_config_keybind_s*,
+                                           char*,
+                                           uintptr_t);
 
 GHOSTTY_API ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*,
                                              ghostty_config_t);
