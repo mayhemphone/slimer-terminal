@@ -19,13 +19,17 @@ struct ClaudeButton: View {
             .foregroundColor(.secondary)
         } primaryAction: {
             guard let surfaceView = model.surfaceView else { return }
-            let placement: ClaudeLauncher.Placement = NSEvent.modifierFlags.contains(.option) ? .splitRight : .tab
+            let preferred = ClaudeLauncher.defaultPlacement
+            let other: ClaudeLauncher.Placement = preferred == .tab ? .splitRight : .tab
+            let placement = NSEvent.modifierFlags.contains(.option) ? other : preferred
             ClaudeLauncher.launch(.new, placement: placement, from: surfaceView)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.visible)
         .fixedSize()
-        .help("Claude Code here (⌥-click: split right)")
+        .help(ClaudeLauncher.defaultPlacement == .tab
+              ? "Claude Code here (⌥-click: split right)"
+              : "Claude Code in a split (⌥-click: new tab)")
         .accessibilityLabel("Claude Code")
     }
 }

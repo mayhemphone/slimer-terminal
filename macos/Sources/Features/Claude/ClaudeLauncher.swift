@@ -25,9 +25,18 @@ enum ClaudeLauncher {
     }
 
     /// Where to start it.
-    enum Placement: Equatable {
+    enum Placement: String, Equatable {
         case tab
         case splitRight
+    }
+
+    static let defaultPlacementKey = "SlimerClaudeDefaultPlacement"
+
+    /// Where a plain click on the status bar's Claude button opens Claude (Option-click
+    /// opens the other one). Set in Settings ▸ Claude.
+    static var defaultPlacement: Placement {
+        get { UserDefaults.standard.string(forKey: defaultPlacementKey).flatMap(Placement.init(rawValue:)) ?? .tab }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultPlacementKey) }
     }
 
     static let installURL = URL(string: "https://claude.com/claude-code")
