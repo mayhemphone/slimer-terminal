@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    slimer: PSReadLine predictor that reports the edit buffer to Slimer
+    autocomplete (OSC 7704). It never returns suggestions.
+
+    UNTESTED: never built. Build on Windows (or any OS with the .NET SDK):
+      dotnet build -c Release
+    then copy bin/Release/net6.0/SlimerPredictor.dll next to slimer.psm1
+    (the module also looks in bin/Release/net6.0/ directly).
+
+    net6.0 with System.Management.Automation 7.2.0 loads in pwsh 7.2 and
+    every later 7.x (7.4+ runs on .NET 8, which loads net6.0 assemblies).
+    The reference is compile-only: pwsh supplies the real assembly.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>SlimerPredictor</AssemblyName>
+    <RootNamespace>Slimer.PowerShell</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>10.0</LangVersion>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management.Automation" Version="7.2.0" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+</Project>

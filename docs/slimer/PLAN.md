@@ -146,6 +146,7 @@ Files: `macos/Sources/Features/QuickTerminal/*` (`QuickTerminalController.swift`
 - **Shell-type indicator (your Windows ask):** status bar chip showing PowerShell 7 / Windows PowerShell / cmd / WSL:<distro> / Git Bash, derived from the launched command plus the integration script's self-report (`OSC <ours>;shell=pwsh`), with distinct icon and accent color per type; also drives tab tint by default.
 - Toolchain: VS 2022 17.10+, Windows SDK 22621+, Zig 0.16+ (`zig build -Doptimize=ReleaseSafe -Drenderer=directx`), MSBuild `App`, MSIX. Code-sign with a real certificate (the upstream host uses a self-signed one).
 - Reuse: Zig-core features and `workspace.json` carry over unchanged; Swift UI is rewritten in WinUI.
+- Status: prepared, not started on Windows. [`WINDOWS.md`](WINDOWS.md) is the porting guide (merge plan for the core, core gaps such as OSC 7 being ignored on Windows and the accept trigger under ConPTY, feature-by-feature mapping, shell-type indicator design, order and effort). The PowerShell module (`src/shell-integration/powershell/`: OSC 133/7/2, OSC 7706 self-report, autocomplete via a `SlimerPredictor` ICommandPredictor and Ctrl+Alt+Shift+F12/F11 accept chords) and its Pester tests are written but untested: no PowerShell was available.
 
 ## Critical files (macOS)
 
