@@ -2458,6 +2458,39 @@ keybind: Keybinds = .{},
 /// Only implemented on macOS.
 @"slimer-status-bar": SlimerStatusBar = .bottom,
 
+// slimer: hold-to-show shortcut cheat sheet. See docs/slimer/SHORTCUTS.md.
+/// The modifier key that, held down on its own for
+/// `slimer-shortcut-overlay-delay`, shows a sheet of the keyboard shortcuts
+/// available in Slimer over the focused window. Releasing the key, pressing
+/// any other key, clicking, or switching apps hides it. Pressing another key
+/// while the modifier is held (Ctrl-C, for example) cancels it, so normal
+/// shortcuts never show the sheet. Key events are never delayed or consumed.
+///
+/// Valid values are:
+///
+///   * `ctrl` - Hold Control. This is the default.
+///
+///   * `cmd` - Hold Command.
+///
+///   * `option` - Hold Option.
+///
+///   * `off` - Never show the sheet.
+///
+/// This can be changed at runtime.
+///
+/// Only implemented on macOS.
+@"slimer-shortcut-overlay": SlimerShortcutOverlay = .ctrl,
+
+// slimer: see slimer-shortcut-overlay.
+/// How long the `slimer-shortcut-overlay` modifier must be held on its own
+/// before the shortcut sheet appears. Uses the same duration syntax as
+/// `resize-overlay-duration` (for example `2s` or `1500ms`).
+///
+/// Default: `2s`.
+///
+/// Only implemented on macOS.
+@"slimer-shortcut-overlay-delay": Duration = .{ .duration = 2 * std.time.ns_per_s },
+
 /// If true, when there are multiple split panes, the mouse selects the pane
 /// that is focused. This only applies to the currently focused window; e.g.
 /// mousing over a split in an unfocused window will not focus that split
@@ -9681,6 +9714,14 @@ pub const SlimerStatusBar = enum {
     hidden,
 };
 
+// slimer: see slimer-shortcut-overlay.
+pub const SlimerShortcutOverlay = enum {
+    ctrl,
+    cmd,
+    option,
+    off,
+};
+
 /// See resize-overlay-position
 pub const ResizeOverlayPosition = enum {
     center,
@@ -11631,5 +11672,55 @@ test "compatibility: window new-window" {
             MacOSDockDropBehavior.@"new-window",
             cfg.@"macos-dock-drop-behavior",
         );
+    }
+}
+
+// slimer
+test "slimer-shortcut-overlay keys" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Defaults: hold Control for two seconds.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.finalize();
+        try testing.expectEqual(SlimerShortcutOverlay.ctrl, cfg.@"slimer-shortcut-overlay");
+        try testing.expectEqual(@as(c_uint, 2000), cfg.@"slimer-shortcut-overlay-delay".asMilliseconds());
+    }
+
+    // Every value parses, durations use the usual syntax.
+    inline for (.{
+        .{ "cmd", SlimerShortcutOverlay.cmd },
+        .{ "option", SlimerShortcutOverlay.option },
+        .{ "off", SlimerShortcutOverlay.off },
+        .{ "ctrl", SlimerShortcutOverlay.ctrl },
+    }) |case| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--slimer-shortcut-overlay=" ++ case[0],
+            "--slimer-shortcut-overlay-delay=1500ms",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expectEqual(case[1], cfg.@"slimer-shortcut-overlay");
+        try testing.expectEqual(@as(c_uint, 1500), cfg.@"slimer-shortcut-overlay-delay".asMilliseconds());
+        try testing.expect(cfg._diagnostics.empty());
+    }
+
+    // Invalid values are diagnostics and keep the defaults.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--slimer-shortcut-overlay=shift",
+            "--slimer-shortcut-overlay-delay=soon",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expectEqual(SlimerShortcutOverlay.ctrl, cfg.@"slimer-shortcut-overlay");
+        try testing.expectEqual(@as(c_uint, 2000), cfg.@"slimer-shortcut-overlay-delay".asMilliseconds());
+        try testing.expectEqual(@as(usize, 2), cfg._diagnostics.items().len);
     }
 }
