@@ -2977,11 +2977,28 @@ keybind: Keybinds = .{},
 ///     This is particularly useful on macOS where PATH is often overridden by
 ///     system scripts. The directory is only added if not already present.
 ///
+///   * `autocomplete` - (Slimer) Make the shell report its command line to
+///     the terminal (OSC 7704) and accept completions from the autocomplete
+///     popup (CSI 7705 ~). Off by default; turned on by `autocomplete = true`.
+///     zsh only for now.
+///
 /// SSH features work independently and can be combined for optimal experience:
 /// when both `ssh-env` and `ssh-terminfo` are enabled, Ghostty will install its
 /// terminfo on remote hosts and use `xterm-ghostty` as TERM, falling back to
 /// `xterm-256color` with environment variables if terminfo installation fails.
 @"shell-integration-features": ShellIntegrationFeatures = .{},
+
+/// Enable the Slimer autocomplete popup.
+///
+/// When enabled, the `autocomplete` shell-integration feature is added so
+/// the shell reports its live command line to the terminal and accepts
+/// completions from the popup. This requires shell integration to be
+/// active (currently zsh only). The reported command line is treated as
+/// untrusted data: it is length-capped, only accepted while the shell is
+/// at a prompt, rate limited, and never executed.
+///
+/// Default: `false`.
+autocomplete: bool = false,
 
 /// Custom entries into the command palette.
 ///
@@ -4797,6 +4814,10 @@ pub fn finalize(self: *Config) !void {
         // HACK: See comment above at definition
         self.term = "xterm-ghostty";
     }
+
+    // slimer: the autocomplete popup needs the shell to report its
+    // command line, so the config key implies the shell feature.
+    if (self.autocomplete) self.@"shell-integration-features".autocomplete = true;
 
     // The default for the working directory depends on the system.
     var wd: WorkingDirectory = self.@"working-directory" orelse if (probable_cli)
@@ -8912,6 +8933,7 @@ pub const ShellIntegrationFeatures = packed struct {
     @"ssh-env": bool = false,
     @"ssh-terminfo": bool = false,
     path: bool = true,
+    autocomplete: bool = false, // slimer: implied by `autocomplete = true`
 };
 
 /// See vt-xt-checksum-extension
@@ -10842,6 +10864,41 @@ test "clone preserves conditional set" {
     defer clone1.deinit();
 
     try testing.expect(clone1._conditional_set.contains(.theme));
+}
+
+// slimer
+test "autocomplete implies the autocomplete shell integration feature" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.finalize();
+        try testing.expect(!cfg.@"shell-integration-features".autocomplete);
+    }
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{"--autocomplete=true"} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(cfg.@"shell-integration-features".autocomplete);
+        // Other features keep their defaults.
+        try testing.expect(cfg.@"shell-integration-features".cursor);
+    }
+
+    // The explicit feature still parses on its own (backwards compatible list).
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{"--shell-integration-features=no-cursor,autocomplete"} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(cfg.@"shell-integration-features".autocomplete);
+        try testing.expect(!cfg.@"shell-integration-features".cursor);
+    }
 }
 
 test "working-directory expands tilde" {
