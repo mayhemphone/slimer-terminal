@@ -706,7 +706,7 @@ class BaseTerminalController: NSWindowController,
         guard surfaceTree.contains(target) else { return }
 
         // Equalize the splits
-        surfaceTree = surfaceTree.equalized()
+        arrangePanes(.equalizeAll) // slimer: undoable equalize (see BaseTerminalController+Arrange.swift)
     }
 
     @objc private func ghosttyDidFocusSplit(_ notification: Notification) {
@@ -1516,6 +1516,8 @@ extension BaseTerminalController: NSMenuItemValidation {
             return focusedSurface?.searchState != nil
 
         default:
+            // slimer: Arrange Panes items need two or more panes
+            if let arrange = validateArrangePanesMenuItem(item) { return arrange }
             return true
         }
     }

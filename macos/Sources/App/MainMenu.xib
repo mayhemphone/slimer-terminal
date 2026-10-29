@@ -497,6 +497,50 @@
                                     </items>
                                 </menu>
                             </menuItem>
+                            <menuItem title="Arrange Panes" id="sLA-pn-0mI">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <menu key="submenu" title="Arrange Panes" id="sLA-pn-0Mn">
+                                    <items>
+                                        <menuItem title="Equalize All" id="sLA-pn-1eA">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="equalizeSplits:" target="-1" id="sLA-pn-1eX"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Equal Widths" id="sLA-pn-2wD">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="arrangePanesEqualWidths:" target="-1" id="sLA-pn-2wX"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Equal Heights" id="sLA-pn-3hT">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="arrangePanesEqualHeights:" target="-1" id="sLA-pn-3hX"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem isSeparatorItem="YES" id="sLA-pn-4sP"/>
+                                        <menuItem title="Even Grid" keyEquivalent="g" id="sLA-pn-5gR">
+                                            <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
+                                            <connections>
+                                                <action selector="arrangePanesEvenGrid:" target="-1" id="sLA-pn-5gX"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Columns" id="sLA-pn-6cL">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="arrangePanesColumns:" target="-1" id="sLA-pn-6cX"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Rows" id="sLA-pn-7rW">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="arrangePanesRows:" target="-1" id="sLA-pn-7rX"/>
+                                            </connections>
+                                        </menuItem>
+                                    </items>
+                                </menu>
+                            </menuItem>
                             <menuItem isSeparatorItem="YES" id="dgt-Tx-d4e"/>
                             <menuItem title="Return To Default Size" id="Gbx-Vi-OGC" userLabel="Return To Default Size">
                                 <modifierMask key="keyEquivalentModifierMask"/>
