@@ -22,12 +22,12 @@ extension Ghostty.Config {
 
     /// `autocomplete-enter`.
     var autocompleteEnter: AutocompleteEnterMode {
-        guard let config = self.config else { return .accept }
+        guard let config = self.config else { return .navigated }
         var v: UnsafePointer<Int8>?
         let key = "autocomplete-enter"
         guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))),
-              let ptr = v else { return .accept }
-        return AutocompleteEnterMode(rawValue: String(cString: ptr)) ?? .accept
+              let ptr = v else { return .navigated }
+        return AutocompleteEnterMode(rawValue: String(cString: ptr)) ?? .navigated
     }
 
     /// The configured `foreground`, for the popup's text.

@@ -35,11 +35,12 @@ struct AutocompleteModelTests {
         #expect(AutocompleteText.splitMatched("éa", matchLength: 2) == ("é", "a"))
     }
 
-    @Test func dangerousItemsAreNeverPreselected() {
-        #expect(AutocompleteSelection.initial([item("a"), item("b")]) == 0)
-        #expect(AutocompleteSelection.initial([item("rm", dangerous: true), item("b")]) == 1)
-        #expect(AutocompleteSelection.initial([item("rm", dangerous: true)]) == nil)
-        #expect(AutocompleteSelection.initial([]) == nil)
+    @Test func topSkipsDangerousAndHistoryItems() {
+        #expect(AutocompleteSelection.top([item("a"), item("b")]) == 0)
+        #expect(AutocompleteSelection.top([item("rm", dangerous: true), item("b")]) == 1)
+        #expect(AutocompleteSelection.top([item("git push", kind: .history), item("push")]) == 1)
+        #expect(AutocompleteSelection.top([item("rm", dangerous: true)]) == nil)
+        #expect(AutocompleteSelection.top([]) == nil)
     }
 
     @Test func selectionWraps() {
@@ -75,39 +76,76 @@ struct AutocompleteModelTests {
 
         let empty = AutocompleteBuffer(text: "", cursor: 0)
         #expect(!AutocompleteVisibility.shouldShow(buffer: empty, suggestions: more))
+
+        // After a trailing space the token is empty: held back until Tab.
+        let spaced = AutocompleteBuffer(text: "git ", cursor: 4)
+        let subs = AutocompleteSuggestions(
+            items: [item("status"), item("stash")], replaceStart: 4, replaceLength: 0, replaceColumns: 0, generation: 2)
+        #expect(!AutocompleteVisibility.shouldShow(buffer: spaced, suggestions: subs))
+        #expect(AutocompleteVisibility.shouldShow(buffer: spaced, suggestions: subs, requested: true))
+        #expect(AutocompleteVisibility.canOpenWithTab(buffer: spaced, suggestions: subs))
+        #expect(!AutocompleteVisibility.canOpenWithTab(buffer: buffer, suggestions: more))
     }
 
     private func action(
         _ keyCode: UInt16,
         _ chars: String? = nil,
         _ mods: NSEvent.ModifierFlags = [],
-        enter: AutocompleteEnterMode = .accept,
-        selection: Bool = true,
-        atEnd: Bool = true
+        visible: Bool = true,
+        navigated: Bool = false,
+        hasTop: Bool = true,
+        atEnd: Bool = true,
+        vi: Bool = false,
+        canOpen: Bool = false,
+        enter: AutocompleteEnterMode = .navigated
     ) -> AutocompleteKeyAction {
         AutocompleteKeys.action(
             keyCode: keyCode, characters: chars, modifiers: mods,
-            enterMode: enter, hasSelection: selection, cursorAtEnd: atEnd)
+            context: .init(
+                visible: visible, navigated: navigated, hasTop: hasTop, cursorAtEnd: atEnd,
+                viKeymap: vi, canOpen: canOpen, enterMode: enter))
     }
 
-    @Test func keyMapping() {
-        #expect(action(AutocompleteKeys.tab) == .next)
-        #expect(action(AutocompleteKeys.tab, nil, .shift) == .previous)
+    @Test func enterRunsTheCommandUnlessTheUserNavigated() {
+        // Warp-like default: Enter passes through (and hides) without navigation.
+        #expect(action(AutocompleteKeys.enter) == .hideAndPassthrough)
+        #expect(action(AutocompleteKeys.keypadEnter) == .hideAndPassthrough)
+        #expect(action(AutocompleteKeys.enter, navigated: true) == .acceptSelected)
+        // accept mode inserts the top row; passthrough never accepts.
+        #expect(action(AutocompleteKeys.enter, enter: .accept) == .acceptTop)
+        #expect(action(AutocompleteKeys.enter, hasTop: false, enter: .accept) == .hideAndPassthrough)
+        #expect(action(AutocompleteKeys.enter, navigated: true, enter: .passthrough) == .hideAndPassthrough)
+    }
+
+    @Test func tabAndRightAcceptTheTopOrSelectedRow() {
+        #expect(action(AutocompleteKeys.tab) == .acceptTop)
+        #expect(action(AutocompleteKeys.tab, navigated: true) == .acceptSelected)
+        #expect(action(AutocompleteKeys.tab, hasTop: false) == .passthrough)
+        #expect(action(AutocompleteKeys.right) == .acceptTop)
+        #expect(action(AutocompleteKeys.right, atEnd: false) == .passthrough)
+        #expect(action(AutocompleteKeys.tab, nil, .command) == .passthrough)
+    }
+
+    @Test func navigationKeys() {
         #expect(action(AutocompleteKeys.down) == .next)
         #expect(action(AutocompleteKeys.up) == .previous)
+        #expect(action(AutocompleteKeys.tab, nil, .shift) == .previous)
         #expect(action(45, "n", .control) == .next)
         #expect(action(35, "p", .control) == .previous)
         #expect(action(8, "c", .control) == .passthrough)
-        #expect(action(AutocompleteKeys.escape) == .dismiss)
-        #expect(action(AutocompleteKeys.enter) == .accept)
-        #expect(action(AutocompleteKeys.keypadEnter) == .accept)
-        #expect(action(AutocompleteKeys.enter, enter: .passthrough) == .passthrough)
-        // No selection (all dangerous): Enter goes to the shell.
-        #expect(action(AutocompleteKeys.enter, selection: false) == .passthrough)
-        #expect(action(AutocompleteKeys.right) == .accept)
-        #expect(action(AutocompleteKeys.right, atEnd: false) == .passthrough)
         #expect(action(0, "a") == .passthrough)
-        #expect(action(AutocompleteKeys.tab, nil, .command) == .passthrough)
+    }
+
+    @Test func escapeInViKeymapsAlsoReachesTheShell() {
+        #expect(action(AutocompleteKeys.escape) == .dismiss)
+        #expect(action(AutocompleteKeys.escape, vi: true) == .hideAndPassthrough)
+    }
+
+    @Test func hiddenPopupOnlyOpensWithTabOnAnEmptyToken() {
+        #expect(action(AutocompleteKeys.tab, visible: false) == .passthrough)
+        #expect(action(AutocompleteKeys.tab, visible: false, canOpen: true) == .open)
+        #expect(action(AutocompleteKeys.enter, visible: false, canOpen: true) == .passthrough)
+        #expect(action(AutocompleteKeys.down, visible: false, canOpen: true) == .passthrough)
     }
 
     @Test func cResultConversionCopiesStringsAndAppliesMaxItems() {

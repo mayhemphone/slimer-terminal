@@ -115,6 +115,10 @@ final class AutocompletePopupView: NSView {
     }
 
     private func makeRow(_ item: AutocompleteItem) -> Row {
+        // History rows show the whole line; truncate in the middle so the
+        // end (usually what differs) stays visible. Others truncate at the end.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = item.replacesLine ? .byTruncatingMiddle : .byTruncatingTail
         let display = AutocompleteText.sanitize(item.display)
         // Bolding uses byte offsets into the raw display; sanitizing only
         // replaces scalars 1:1 except for the length cap, so split the raw
@@ -122,12 +126,12 @@ final class AutocompletePopupView: NSView {
         let parts = AutocompleteText.splitMatched(item.display, matchLength: item.matchLength)
         let text = NSMutableAttributedString(
             string: AutocompleteText.sanitize(parts.matched),
-            attributes: [.font: boldFont, .foregroundColor: palette.foreground]
+            attributes: [.font: boldFont, .foregroundColor: palette.foreground, .paragraphStyle: paragraph]
         )
         let rest = parts.matched.isEmpty ? display : AutocompleteText.sanitize(parts.rest)
         text.append(NSAttributedString(
             string: rest,
-            attributes: [.font: font, .foregroundColor: palette.foreground]
+            attributes: [.font: font, .foregroundColor: palette.foreground, .paragraphStyle: paragraph]
         ))
         let icon = NSAttributedString(
             string: item.kind.icon,
@@ -161,8 +165,8 @@ final class AutocompletePopupView: NSView {
             row.icon.draw(at: NSPoint(x: x, y: baseline))
             x += row.icon.size().width + 6
             let maxTextWidth = bounds.width - x - Self.padding
-            row.text.draw(with: NSRect(x: x, y: baseline, width: maxTextWidth, height: rowHeight),
-                          options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+            // draw(in:) honors the row's line-break (tail or middle) mode.
+            row.text.draw(in: NSRect(x: x, y: baseline, width: maxTextWidth, height: rowHeight))
             x += min(row.text.size().width, maxTextWidth)
             if let badge = row.badge {
                 x += 6
