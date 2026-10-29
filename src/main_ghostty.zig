@@ -241,6 +241,7 @@ test {
     _ = @import("input.zig");
     _ = @import("cli.zig");
     _ = @import("surface_mouse.zig");
+    _ = @import("slimer/prompt.zig"); // slimer: idle prompt check tests
 
     // Libraries
     _ = @import("tripwire.zig");
