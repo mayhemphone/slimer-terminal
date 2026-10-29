@@ -143,6 +143,11 @@ pub const Action = union(Key) {
     insert_columns: usize,
     delete_columns: usize,
 
+    /// slimer: OSC 7704 autocomplete buffer report. The buffer is already
+    /// percent-decoded and points into the OSC parser's storage, so it is
+    /// only valid for the duration of the callback.
+    autocomplete_buffer: osc.Command.AutocompleteBuffer,
+
     pub const Key = lib.Enum(
         lib.target,
         &.{
@@ -254,6 +259,7 @@ pub const Action = union(Key) {
             "forward_index",
             "insert_columns",
             "delete_columns",
+            "autocomplete_buffer", // slimer
         },
     );
 
@@ -2997,6 +3003,11 @@ pub fn Stream(comptime H: type) type {
 
                 .program_status => |v| {
                     self.handler.vt(.program_status, v);
+                },
+
+                // slimer
+                .autocomplete_buffer => |v| {
+                    self.handler.vt(.autocomplete_buffer, v);
                 },
 
                 .unknown => |v| {
