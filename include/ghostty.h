@@ -937,6 +937,31 @@ typedef struct {
   ssize_t selected;
 } ghostty_action_search_selected_s;
 
+// slimer: apprt.action.AutocompleteUpdate.C
+typedef struct {
+  uint64_t generation;
+} ghostty_action_autocomplete_update_s;
+
+// slimer: autocomplete.Keymap
+typedef enum {
+  GHOSTTY_AUTOCOMPLETE_KEYMAP_EMACS = 0,
+  GHOSTTY_AUTOCOMPLETE_KEYMAP_VIINS = 1,
+  GHOSTTY_AUTOCOMPLETE_KEYMAP_VICMD = 2,
+  GHOSTTY_AUTOCOMPLETE_KEYMAP_OTHER = 3,
+} ghostty_autocomplete_keymap_e;
+
+// slimer: snapshot of the shell-reported command line. `buffer` points at
+// surface-owned memory that stays valid until the next autocomplete
+// update or dismiss on that surface, on the surface's (main) thread.
+// Copy it if you keep it. `keymap` is a ghostty_autocomplete_keymap_e.
+typedef struct {
+  const char* buffer;
+  uintptr_t len;
+  uint32_t cursor;
+  uint8_t keymap;
+  uint64_t generation;
+} ghostty_autocomplete_buffer_s;
+
 // terminal.Scrollbar
 typedef struct {
   uint64_t total;
@@ -1016,6 +1041,7 @@ typedef enum {
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_RESIZE_WINDOW,
+  GHOSTTY_ACTION_AUTOCOMPLETE_UPDATE,  // slimer
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1060,6 +1086,7 @@ typedef union {
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
   ghostty_action_open_config_e open_config;
+  ghostty_action_autocomplete_update_s autocomplete_update;  // slimer
 } ghostty_action_u;
 
 typedef struct {
@@ -1235,6 +1262,13 @@ GHOSTTY_API void ghostty_surface_complete_clipboard_request(
 GHOSTTY_API void ghostty_surface_deny_clipboard_request(ghostty_surface_t,
                                                            void*);
 GHOSTTY_API bool ghostty_surface_has_selection(ghostty_surface_t);
+// slimer: autocomplete. See docs/slimer/AUTOCOMPLETE.md.
+GHOSTTY_API bool ghostty_surface_autocomplete_buffer(ghostty_surface_t,
+                                                    ghostty_autocomplete_buffer_s*);
+GHOSTTY_API void ghostty_surface_autocomplete_accept(ghostty_surface_t,
+                                                    const char*,
+                                                    uintptr_t);
+GHOSTTY_API void ghostty_surface_autocomplete_dismiss(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_read_selection(ghostty_surface_t, ghostty_text_s*);
 GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
                                               ghostty_selection_s,
