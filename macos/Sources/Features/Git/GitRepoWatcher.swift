@@ -40,6 +40,8 @@ final class GitRepoWatcher {
             Target(url: commonDir.appendingPathComponent("refs"), isDirectory: true),
             Target(url: commonDir.appendingPathComponent("refs/heads"), isDirectory: true),
             Target(url: commonDir.appendingPathComponent("refs/remotes"), isDirectory: true),
+            // Rewritten by `git gc` / `pack-refs` via rename, re-armed like HEAD/index.
+            Target(url: commonDir.appendingPathComponent("packed-refs"), isDirectory: false),
         ]
         if commonDir.standardizedFileURL.path != gitDir.standardizedFileURL.path {
             targets.append(Target(url: commonDir, isDirectory: true))

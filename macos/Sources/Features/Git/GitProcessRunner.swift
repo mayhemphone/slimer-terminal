@@ -32,7 +32,8 @@ final class GitProcessRunner: Sendable {
     }
 
     /// The fixed search path used to locate `git` and exported as `PATH`.
-    static let searchPath = ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+    /// Homebrew first: it is faster to start than Apple's `/usr/bin/git` xcrun shim.
+    static let searchPath = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
 
     /// Global options placed before every subcommand.
     static let hardeningArguments = ["-c", "core.fsmonitor=false"]
@@ -99,6 +100,11 @@ final class GitProcessRunner: Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // `waitUntilExit()` waits by polling the run loop and added ~45 ms per call in
+        // measurements; a termination handler signals as soon as the child is reaped.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
         let started = Date()
         do {
             try process.run()
@@ -139,7 +145,7 @@ final class GitProcessRunner: Sendable {
         }
         helperQueue.asyncAfter(deadline: .now() + timeout, execute: killer)
 
-        process.waitUntilExit()
+        exited.wait()
         killer.cancel()
 
         // Pipes close when the child exits. Bound the wait anyway in case a

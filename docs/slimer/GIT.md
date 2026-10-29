@@ -81,9 +81,10 @@ for non-repositories, excluded paths, or when the service is disabled.
   it on PWD change and on `COMMAND_FINISHED`.
 - The first subscription to `observe`.
 - File watches (`DispatchSource` vnode, `O_EVTONLY`) on the git dir, `HEAD`, `index`,
-  `refs/`, `refs/heads/`, `refs/remotes/` and (for linked worktrees) the common dir.
-  Marker files such as `MERGE_HEAD` show up as git-dir directory writes. Replaced
-  files (git renames over `HEAD`/`index`) are re-armed after 200 ms.
+  `refs/`, `refs/heads/`, `refs/remotes/`, `packed-refs` (common dir) and (for linked
+  worktrees) the common dir itself. Marker files such as `MERGE_HEAD` show up as git-dir
+  directory writes. Replaced files (git renames over `HEAD`, `index`, `packed-refs`) are
+  re-armed after 200 ms; files that do not exist yet are picked up on the next event.
 - Watchers exist only while a root has at least one observer. They are dropped 60 s
   after the last observer cancels.
 
@@ -99,7 +100,8 @@ for non-repositories, excluded paths, or when the service is disabled.
 
 - **Read-only.** The app itself runs only `rev-parse`, `status`, `stash list` and
   `for-each-ref`. Mutating commands are never executed by the app.
-- **git lookup:** only on `/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`. The user's
+- **git lookup:** only on `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, in that
+  order (Homebrew git is preferred; it starts faster than Apple's shim). The user's
   `$PATH` is never consulted. `/usr/bin/git` is accepted only when `xcode-select -p`
   succeeds, so the app never triggers the "install developer tools" dialog. With no
   git found, the service is disabled and publishes `nil`.
@@ -132,7 +134,10 @@ sends Enter only after an explicit confirm click.
 
 ## Measured latency
 
-On an Apple Silicon Mac with `/usr/bin/git` (Apple git, xcrun shim) against this
-repository (about 5,900 tracked files): root resolution about 64 ms; full refresh
-p50 67 ms, max 73 ms over 20 runs. Most of this is the shim's startup cost. A
-Homebrew git is faster but `/usr/bin` comes first on the fixed search path.
+On an Apple Silicon Mac with Homebrew git 2.50 against this repository (about 5,900
+tracked files), 20 runs: root resolution about 7 ms; full refresh p50 24 ms, max
+33 ms. Raw `git status` alone is about 20 ms, so runner overhead is a few ms.
+
+An earlier version waited with `Process.waitUntilExit()`, which polls the run loop
+and added about 45 ms to every call (67 ms per refresh, 64 ms per resolution). The
+runner now waits on a `terminationHandler` semaphore instead.

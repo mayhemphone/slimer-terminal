@@ -267,7 +267,7 @@ struct GitStatusServiceIntegrationTests {
 struct GitProcessRunnerTests {
     @Test func environmentIsMinimalAndFixed() {
         let env = GitProcessRunner.makeEnvironment(home: "/Users/test")
-        #expect(env["PATH"] == "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
+        #expect(env["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
         #expect(env["HOME"] == "/Users/test")
         #expect(env["LANG"] == "C")
         #expect(env["GIT_OPTIONAL_LOCKS"] == "0")
@@ -304,7 +304,7 @@ struct GitProcessRunnerTests {
         let lines = Set(output.stdoutText.split(separator: "\n").map(String.init))
         #expect(lines.contains("GIT_OPTIONAL_LOCKS=0"))
         #expect(lines.contains("GIT_TERMINAL_PROMPT=0"))
-        #expect(lines.contains("PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"))
+        #expect(lines.contains("PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
         #expect(!lines.contains { $0.hasPrefix("GIT_DIR=") || $0.hasPrefix("GIT_WORK_TREE=") })
     }
 
@@ -315,5 +315,44 @@ struct GitProcessRunnerTests {
         let version = runner.run(["--version"], in: nil, timeout: 2)
         #expect(version.succeeded)
         #expect(version.stdoutText.hasPrefix("git version"))
+    }
+
+    @Test func searchPathPrefersHomebrew() {
+        #expect(GitProcessRunner.searchPath == ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
+    }
+}
+
+/// Uses a fake git directory; no git binary needed.
+@MainActor
+struct GitRepoWatcherTests {
+    @Test func watchesPackedRefsAndRearmsAfterRename() async throws {
+        let fm = FileManager.default
+        let gitDir = fm.temporaryDirectory.appendingPathComponent("slimer-watch-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: gitDir.appendingPathComponent("refs/heads"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: gitDir) }
+        try Data("ref: refs/heads/main\n".utf8).write(to: gitDir.appendingPathComponent("HEAD"))
+        let packed = gitDir.appendingPathComponent("packed-refs")
+        try Data("# pack-refs\n".utf8).write(to: packed)
+
+        var events = 0
+        let watcher = GitRepoWatcher(gitDir: gitDir, commonDir: gitDir) { events += 1 }
+        watcher.start()
+        defer { watcher.stop() }
+        #expect(watcher.watchedPaths.contains(packed.path))
+
+        // Replace packed-refs the way git does: write a temp file, rename over it.
+        let temp = gitDir.appendingPathComponent("packed-refs.lock")
+        try Data("# pack-refs v2\n".utf8).write(to: temp)
+        _ = try fm.replaceItemAt(packed, withItemAt: temp)
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, events == 0 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(events > 0)
+
+        // After the re-arm delay the new inode is watched again.
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(watcher.watchedPaths.contains(packed.path))
     }
 }
