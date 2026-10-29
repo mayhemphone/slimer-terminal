@@ -1,0 +1,38 @@
+// Slimer starter spec (hand-written, not from withfig/autocomplete).
+const installed = {
+  script: ["brew", "list", "-1"],
+  postProcess: (out) => out.split("\n").filter(Boolean).map((name) => ({ name })),
+};
+
+const completionSpec = {
+  name: "brew",
+  description: "The missing package manager for macOS",
+  options: [
+    { name: ["-v", "--version"], description: "Print the Homebrew version" },
+    { name: ["-h", "--help"], description: "Show help" },
+  ],
+  subcommands: [
+    { name: "install", description: "Install a formula or cask", options: [{ name: "--cask", description: "Treat all arguments as casks" }, { name: "--formula", description: "Treat all arguments as formulae" }, { name: ["-f", "--force"], description: "Install even if already installed" }, { name: "--HEAD", description: "Install the HEAD version" }], args: { name: "formula", isVariadic: true } },
+    { name: ["uninstall", "remove", "rm"], description: "Uninstall a formula or cask", isDangerous: true, options: [{ name: "--cask", description: "Treat all arguments as casks" }, { name: "--zap", description: "Remove all files associated with a cask", isDangerous: true }], args: { name: "formula", isVariadic: true, generators: installed } },
+    { name: "update", description: "Fetch the newest version of Homebrew" },
+    { name: "upgrade", description: "Upgrade outdated formulae and casks", options: [{ name: "--cask", description: "Only casks" }, { name: "--greedy", description: "Also upgrade auto-updating casks" }], args: { name: "formula", isOptional: true, isVariadic: true, generators: installed } },
+    { name: "outdated", description: "List installed formulae with newer versions" },
+    { name: ["list", "ls"], description: "List installed formulae and casks", options: [{ name: "--cask", description: "Only casks" }, { name: "--versions", description: "Show versions" }] },
+    { name: "search", description: "Search for formulae and casks", args: { name: "text" } },
+    { name: ["info", "abv"], description: "Show information about a formula", args: { name: "formula", isOptional: true } },
+    { name: "doctor", description: "Check your system for potential problems" },
+    { name: "cleanup", description: "Remove stale lock files and outdated downloads", options: [{ name: "--prune", description: "Remove cache files older than days", requiresSeparator: true, args: { name: "days" } }, { name: ["-n", "--dry-run"], description: "Show what would be removed" }] },
+    { name: "services", description: "Manage background services", subcommands: [{ name: "list", description: "List services" }, { name: "start", description: "Start a service", args: { name: "formula", generators: installed } }, { name: "stop", description: "Stop a service", args: { name: "formula", generators: installed } }, { name: "restart", description: "Restart a service", args: { name: "formula", generators: installed } }] },
+    { name: "tap", description: "Tap a formula repository", args: { name: "user/repo", isOptional: true } },
+    { name: "untap", description: "Remove a tapped repository", args: { name: "tap" } },
+    { name: "pin", description: "Pin a formula", args: { name: "formula", generators: installed } },
+    { name: "unpin", description: "Unpin a formula", args: { name: "formula", generators: installed } },
+    { name: "link", description: "Symlink a formula's files", args: { name: "formula", generators: installed } },
+    { name: "unlink", description: "Remove a formula's symlinks", args: { name: "formula", generators: installed } },
+    { name: "bundle", description: "Manage a Brewfile", subcommands: [{ name: "install", description: "Install from the Brewfile" }, { name: "dump", description: "Write a Brewfile" }, { name: "check", description: "Check whether the Brewfile is satisfied" }, { name: "cleanup", description: "Uninstall what is not in the Brewfile", isDangerous: true }] },
+    { name: "deps", description: "Show dependencies", args: { name: "formula" } },
+    { name: "uses", description: "Show formulae that depend on a formula", args: { name: "formula" } },
+  ],
+};
+
+export default completionSpec;

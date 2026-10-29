@@ -23,6 +23,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub const Engine = @import("Engine.zig");
+pub const Spec = @import("Spec.zig");
+pub const Tokenizer = @import("Tokenizer.zig");
+pub const History = @import("History.zig");
+
+/// Glue between the core surface and the shared engine. Only analyzed
+/// when referenced (it pulls in global state).
+pub const glue = @import("glue.zig");
+
 /// The longest decoded buffer the surface stores. Matches the parser's
 /// `max_buffer_bytes` and the shell-side truncation cap.
 pub const max_buffer_bytes = 4096;
@@ -85,6 +94,13 @@ pub const State = struct {
     cursor: u32 = 0,
     keymap: Keymap = .other,
 
+    /// The shell truncated the buffer; never recorded to history.
+    truncated: bool = false,
+
+    /// Strings of the last query result, owned by the surface until the
+    /// next query (the engine's own scratch memory is shared).
+    query_arena: ?std.heap.ArenaAllocator = null,
+
     /// True between a `set` and the next `clear`. The C API reports
     /// false when nothing is live so the app can hide its popup.
     active: bool = false,
@@ -98,7 +114,18 @@ pub const State = struct {
 
     pub fn deinit(self: *State, alloc: Allocator) void {
         alloc.free(self.buffer);
+        if (self.query_arena) |*a| a.deinit();
         self.* = .{};
+    }
+
+    /// The arena for a new query result, reset from the previous one.
+    pub fn resetQueryArena(self: *State, alloc: Allocator) Allocator {
+        if (self.query_arena) |*a| {
+            _ = a.reset(.retain_capacity);
+        } else {
+            self.query_arena = .init(alloc);
+        }
+        return self.query_arena.?.allocator();
     }
 
     /// Returns true if a report arriving at `now` is within the rate
@@ -127,6 +154,7 @@ pub const State = struct {
         self.buffer = copy;
         self.cursor = @intCast(@min(update.cursor, self.buffer.len));
         self.keymap = update.keymap;
+        self.truncated = update.truncated;
         self.active = true;
         self.generation +%= 1;
     }
@@ -137,6 +165,7 @@ pub const State = struct {
         alloc.free(self.buffer);
         self.buffer = &.{};
         self.cursor = 0;
+        self.truncated = false;
         self.active = false;
         self.generation +%= 1;
     }
@@ -192,16 +221,84 @@ pub fn percentEncode(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Err
 /// `CSI 7705 ~` reads up to the BEL. The caller must have checked the
 /// text with `isSafeAcceptText`.
 pub fn writeAcceptSequence(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    return writeAcceptSequenceMode(writer, text, .token);
+}
+
+/// What an accepted completion replaces in the shell.
+pub const AcceptMode = enum {
+    /// The current token (`CSI 7705 ~`). The widget finds the token and
+    /// shell-quotes the text.
+    token,
+    /// The whole line (`CSI 7706 ~`), for history suggestions. The widget
+    /// inserts the text unquoted, and only if the cursor is at the end
+    /// and the current line is a prefix of the text.
+    line,
+
+    fn csi(self: AcceptMode) []const u8 {
+        return switch (self) {
+            .token => "\x1b[7705~",
+            .line => "\x1b[7706~",
+        };
+    }
+};
+
+/// Like `writeAcceptSequence` with an explicit mode.
+pub fn writeAcceptSequenceMode(writer: *std.Io.Writer, text: []const u8, mode: AcceptMode) std.Io.Writer.Error!void {
     std.debug.assert(isSafeAcceptText(text));
-    try writer.writeAll("\x1b[7705~");
+    try writer.writeAll(mode.csi());
     try percentEncode(writer, text);
     try writer.writeByte(0x07);
 }
+
+/// Sync with `ghostty_autocomplete_item_s` in ghostty.h. Strings are
+/// not NUL-terminated.
+pub const CItem = extern struct {
+    text: [*]const u8 = "",
+    text_len: usize = 0,
+    display: [*]const u8 = "",
+    display_len: usize = 0,
+    description: [*]const u8 = "",
+    description_len: usize = 0,
+    kind: u8 = 0,
+    dangerous: bool = false,
+    /// Bytes at the start of `display` that matched the typed prefix.
+    match_len: u32 = 0,
+};
+
+/// Sync with `ghostty_autocomplete_result_s` in ghostty.h.
+pub const CResult = extern struct {
+    items: [Engine.max_items]CItem = @splat(.{}),
+    count: usize = 0,
+    /// The replaced token, in characters (code points) like the 6A
+    /// cursor, and its display width in terminal cells.
+    replace_start: u32 = 0,
+    replace_len: u32 = 0,
+    replace_cols: u32 = 0,
+    generation: u64 = 0,
+};
 
 /// Upper bound on the encoded size of an accept sequence for `len`
 /// bytes of text.
 pub fn acceptSequenceCapacity(len: usize) usize {
     return "\x1b[7705~".len + len * 3 + 1;
+}
+
+test {
+    _ = Engine;
+    _ = Spec;
+    _ = Tokenizer;
+    _ = History;
+    _ = @import("Fs.zig");
+    _ = @import("Generators.zig");
+    _ = @import("Rank.zig");
+}
+
+test "autocomplete: line accept sequence" {
+    const testing = std.testing;
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeAcceptSequenceMode(&w, "git push; x", .line);
+    try testing.expectEqualStrings("\x1b[7706~git push%3B x\x07", w.buffered());
 }
 
 test "autocomplete: keymap names" {
