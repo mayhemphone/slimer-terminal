@@ -14,7 +14,6 @@ import XCTest
 
 final class WorkspaceModelTests: XCTestCase {
     func testJSONRoundTrip() throws {
-        let date = Date(timeIntervalSince1970: 1_700_000_000)
         let original = WorkspaceDocument(
             locations: [
                 WorkspaceLocation(
@@ -24,9 +23,7 @@ final class WorkspaceModelTests: XCTestCase {
                     color: "#FF8800",
                     pinned: true,
                     shortcut: "cmd+shift+1",
-                    startupCommand: "claude",
-                    useCount: 3,
-                    lastUsed: date
+                    startupCommand: "claude"
                 ),
             ],
             commands: [
@@ -36,13 +33,8 @@ final class WorkspaceModelTests: XCTestCase {
                     cwd: "~/Dev",
                     pinned: false,
                     shortcut: "cmd+shift+g",
-                    confirm: false,
-                    useCount: 1,
-                    lastUsed: date
+                    confirm: false
                 ),
-            ],
-            recent: [
-                WorkspaceRecentDirectory(path: "/Users/me/Dev", count: 4, lastVisited: date),
             ]
         )
 
@@ -50,10 +42,12 @@ final class WorkspaceModelTests: XCTestCase {
         let decoded = try WorkspaceDocument.decode(data)
         XCTAssertEqual(decoded, original)
 
-        // Human-friendly on disk: pretty printed, ISO 8601 dates, unescaped slashes.
+        // Human-friendly on disk: pretty printed, unescaped slashes. Usage and
+        // recent directories are per machine and never written here.
         let text = try XCTUnwrap(String(data: data, encoding: .utf8))
-        XCTAssertTrue(text.contains("\"lastUsed\" : \"2023-11-14T22:13:20Z\""), text)
-        XCTAssertTrue(text.contains("~/Dev/league-view-backend"), text)
+        XCTAssertTrue(text.contains("\"path\" : \"~/Dev/league-view-backend\""), text)
+        XCTAssertFalse(text.contains("useCount"), text)
+        XCTAssertFalse(text.contains("recent"), text)
         XCTAssertTrue(text.hasSuffix("\n"))
     }
 
@@ -85,15 +79,17 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertFalse(doc.locations[0].pinned)
         XCTAssertEqual(doc.locations[1].path, "~/Dev/other")
         XCTAssertFalse(doc.locations[1].pinned) // wrong type -> default
-        XCTAssertEqual(doc.locations[1].useCount, 0)
-        XCTAssertNil(doc.locations[1].lastUsed)
+        XCTAssertNil(doc.locations[1].legacyUsage)
+        // Entries without a path/command are kept, not used.
+        XCTAssertEqual(doc.unusableLocations.map(\.index), [1, 2])
+        XCTAssertEqual(doc.unusableCommands.map(\.index), [1])
 
         XCTAssertEqual(doc.commands.count, 1)
         XCTAssertEqual(doc.commands[0].name, "claude")
         XCTAssertTrue(doc.commands[0].confirm) // default is true
 
-        XCTAssertEqual(doc.recent.count, 1)
-        XCTAssertEqual(doc.recent[0].lastVisited, Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(doc.legacyRecent.count, 1)
+        XCTAssertEqual(doc.legacyRecent[0].lastVisited, Date(timeIntervalSince1970: 1_700_000_000))
     }
 
     func testTolerantParsingOfMissingSections() throws {
@@ -101,7 +97,7 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertEqual(doc.version, WorkspaceDocument.currentVersion)
         XCTAssertTrue(doc.locations.isEmpty)
         XCTAssertTrue(doc.commands.isEmpty)
-        XCTAssertTrue(doc.recent.isEmpty)
+        XCTAssertTrue(doc.legacyRecent.isEmpty)
     }
 
     func testGarbageFails() {
@@ -123,7 +119,7 @@ final class WorkspaceFrecencyTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     func testRecentOrderingPrefersRecentAndFrequent() {
-        var doc = WorkspaceDocument()
+        var doc = WorkspaceRecentDocument()
         // Old but frequent.
         for _ in 0..<10 { doc.recordVisit(path: "/old-frequent", now: now.addingTimeInterval(-30 * 86_400)) }
         // Recent and moderately frequent.
@@ -139,7 +135,7 @@ final class WorkspaceFrecencyTests: XCTestCase {
     }
 
     func testRecentIsCappedAtLimitKeepingBestScores() {
-        var doc = WorkspaceDocument()
+        var doc = WorkspaceRecentDocument()
         // Visits arrive in chronological order. One hot directory visited many
         // times a long time ago must survive the flood of one-off visits below.
         for _ in 0..<50 { doc.recordVisit(path: "/hot", now: now.addingTimeInterval(-50 * 86_400)) }
@@ -155,7 +151,7 @@ final class WorkspaceFrecencyTests: XCTestCase {
     }
 
     func testJustVisitedDirectoryIsNeverEvicted() {
-        var doc = WorkspaceDocument()
+        var doc = WorkspaceRecentDocument()
         for i in 0..<WorkspaceFrecency.recentLimit {
             for _ in 0..<20 { doc.recordVisit(path: "/busy\(i)", now: now) }
         }
@@ -165,27 +161,44 @@ final class WorkspaceFrecencyTests: XCTestCase {
     }
 
     func testLocationsPinnedFirstThenFrecencyThenName() {
-        var doc = WorkspaceDocument(locations: [
+        let doc = WorkspaceDocument(locations: [
             WorkspaceLocation(name: "zeta", path: "/z"),
             WorkspaceLocation(name: "alpha", path: "/a"),
             WorkspaceLocation(name: "pinned", path: "/p", pinned: true),
             WorkspaceLocation(name: "used", path: "/u"),
         ])
-        let usedID = doc.locations[3].id
-        XCTAssertTrue(doc.recordUse(locationID: usedID, now: now.addingTimeInterval(-10)))
-        XCTAssertFalse(doc.recordUse(locationID: UUID(), now: now))
+        var usage = WorkspaceUsageDocument()
+        usage.recordUse(id: doc.locations[3].id, seed: nil, now: now.addingTimeInterval(-10))
 
-        XCTAssertEqual(doc.rankedLocations(now: now).map(\.name), ["pinned", "used", "alpha", "zeta"])
+        XCTAssertEqual(doc.rankedLocations(usage: usage, now: now).map(\.name), ["pinned", "used", "alpha", "zeta"])
     }
 
     func testCommandsPinnedFirstThenFrecency() {
-        var doc = WorkspaceDocument(commands: [
+        let doc = WorkspaceDocument(commands: [
             WorkspaceCommand(name: "b", command: "b"),
             WorkspaceCommand(name: "a", command: "a"),
             WorkspaceCommand(name: "p", command: "p", pinned: true),
         ])
-        doc.recordUse(commandID: doc.commands[0].id, now: now)
-        XCTAssertEqual(doc.rankedCommands(now: now).map(\.name), ["p", "b", "a"])
+        var usage = WorkspaceUsageDocument()
+        usage.recordUse(id: doc.commands[0].id, seed: nil, now: now)
+        XCTAssertEqual(doc.rankedCommands(usage: usage, now: now).map(\.name), ["p", "b", "a"])
+    }
+
+    func testLegacyUsageSeedsLocalStatistics() throws {
+        let json = #"{"commands":[{"id":"0F0E4A2E-0B3F-4D3F-8C6B-2A4C9B1D7E22","command":"a","useCount":5,"lastUsed":"2026-10-28T14:03:11Z"},{"command":"b"}]}"#
+        let doc = try WorkspaceDocument.decode(Data(json.utf8))
+        let seeded = try XCTUnwrap(doc.commands[0].legacyUsage)
+        XCTAssertEqual(seeded.count, 5)
+        // Ranked by the seed until used on this machine.
+        XCTAssertEqual(doc.rankedCommands(now: now).map(\.name), ["a", "b"])
+
+        var usage = WorkspaceUsageDocument()
+        usage.recordUse(id: doc.commands[0].id, seed: seeded, now: now)
+        XCTAssertEqual(usage.entries[doc.commands[0].id]?.count, 6)
+        XCTAssertEqual(usage.entries[doc.commands[0].id]?.lastUsed, now)
+        // usage.json round trip.
+        let reread = WorkspaceUsageDocument(json: try JSONValue.decode(usage.json.encodedFile()))
+        XCTAssertEqual(reread, usage)
     }
 
     func testScoreWeights() {
@@ -472,11 +485,26 @@ final class WorkspaceStartupTests: XCTestCase {
 final class WorkspaceStoreTests: XCTestCase {
     private var directory: URL!
     private var fileURL: URL!
+    private var localDirectory: URL!
 
     override func setUp() async throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("slimer-workspace-tests-\(UUID().uuidString)", isDirectory: true)
         fileURL = directory.appendingPathComponent("sub/workspace.json")
+        localDirectory = directory.appendingPathComponent("local", isDirectory: true)
+    }
+
+    private func makeStore(
+        watch: Bool = false,
+        visitDebounce: TimeInterval = 1.5,
+        now: @escaping () -> Date = Date.init
+    ) -> WorkspaceStore {
+        WorkspaceStore(fileURL: fileURL, localDirectory: localDirectory, watch: watch, visitDebounce: visitDebounce, now: now)
+    }
+
+    private func writeFile(_ json: String) throws {
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: fileURL)
     }
 
     override func tearDown() async throws {
@@ -489,7 +517,7 @@ final class WorkspaceStoreTests: XCTestCase {
     }
 
     func testFirstRunSeedsFileWithRestrictedPermissions() throws {
-        let store = WorkspaceStore(fileURL: fileURL, watch: false)
+        let store = makeStore()
         XCTAssertNil(store.loadError)
         XCTAssertEqual(store.document.locations.map(\.path), ["~", "~/Dev", "~/Dev/league-view-backend"])
         XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
@@ -501,7 +529,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(leftovers, ["workspace.json"])
 
         // A second store reads the same document back.
-        let again = WorkspaceStore(fileURL: fileURL, watch: false)
+        let again = makeStore()
         XCTAssertEqual(again.document, store.document)
     }
 
@@ -510,7 +538,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let garbage = Data("{ this is not json".utf8)
         try garbage.write(to: fileURL)
 
-        let store = WorkspaceStore(fileURL: fileURL, watch: false)
+        let store = makeStore()
         XCTAssertNotNil(store.loadError)
         XCTAssertTrue(store.document.locations.isEmpty)
 
@@ -527,18 +555,18 @@ final class WorkspaceStoreTests: XCTestCase {
 
     func testRecordUseAndVisitPersist() throws {
         var clock = Date(timeIntervalSince1970: 1_800_000_000)
-        let store = WorkspaceStore(fileURL: fileURL, watch: false, now: { clock })
+        let store = makeStore(now: { clock })
         let location = store.document.locations[1] // ~/Dev
         store.recordUse(location: location)
         clock = clock.addingTimeInterval(120)
         store.recordUse(location: location)
 
-        let reloaded = WorkspaceStore(fileURL: fileURL, watch: false)
-        let saved = try XCTUnwrap(reloaded.document.locations.first { $0.id == location.id })
-        XCTAssertEqual(saved.useCount, 2)
+        let reloaded = makeStore()
+        let saved = try XCTUnwrap(reloaded.usage.entries[location.id])
+        XCTAssertEqual(saved.count, 2)
         XCTAssertEqual(saved.lastUsed, clock)
         // Using a location also counts as visiting its directory.
-        XCTAssertTrue(reloaded.document.recent.contains { $0.path == location.expandedPath })
+        XCTAssertTrue(reloaded.recent.recent.contains { $0.path == location.expandedPath })
 
         // Existence is checked (off the main thread) before committing.
         XCTAssertFalse(WorkspaceStore.directoryExists("/definitely/not/a/real/dir"))
@@ -548,19 +576,17 @@ final class WorkspaceStoreTests: XCTestCase {
         let home = NSHomeDirectory()
         store.commitVisit(home)
         store.commitVisit(home)
-        XCTAssertEqual(store.document.recent.first { $0.path == home }?.count, 1)
+        XCTAssertEqual(store.recent.recent.first { $0.path == home }?.count, 1)
         clock = clock.addingTimeInterval(61)
         store.commitVisit(home)
-        XCTAssertEqual(store.document.recent.first { $0.path == home }?.count, 2)
+        XCTAssertEqual(store.recent.recent.first { $0.path == home }?.count, 2)
 
-        let persisted = WorkspaceStore(fileURL: fileURL, watch: false)
-        XCTAssertEqual(persisted.document.recent.first { $0.path == home }?.count, 2)
+        let persisted = makeStore()
+        XCTAssertEqual(persisted.recent.recent.first { $0.path == home }?.count, 2)
     }
 
     func testSaveReappliesChangeOnTopOfUnseenExternalEdit() throws {
-        // Whole-second clock: the file stores ISO 8601 dates without fractions.
-        let clock = Date(timeIntervalSince1970: 1_800_000_000)
-        let store = WorkspaceStore(fileURL: fileURL, watch: false, now: { clock })
+        let store = makeStore()
         let command = store.document.commands[2] // git status
         // Hand edit (not yet delivered by a watcher): rename and add a location.
         var external = store.document
@@ -568,30 +594,33 @@ final class WorkspaceStoreTests: XCTestCase {
         external.locations.append(WorkspaceLocation(name: "Added", path: "/added"))
         try external.encoded().write(to: fileURL)
 
-        store.recordUse(command: command)
+        store.edit { doc in
+            guard let idx = doc.commands.firstIndex(where: { $0.id == command.id }) else { return }
+            doc.commands[idx].pinned = true
+        }
 
         let onDisk = try WorkspaceDocument.decode(Data(contentsOf: fileURL))
         XCTAssertTrue(onDisk.locations.contains { $0.name == "Added" })
         let saved = try XCTUnwrap(onDisk.commands.first { $0.id == command.id })
         XCTAssertEqual(saved.name, "Status (edited)")
-        XCTAssertEqual(saved.useCount, 1)
+        XCTAssertTrue(saved.pinned)
         XCTAssertEqual(store.document, onDisk)
     }
 
     func testRecordUseOfLocationDoesNotDoubleCountTheFollowingShellReport() {
         let clock = Date(timeIntervalSince1970: 1_800_000_000)
-        let store = WorkspaceStore(fileURL: fileURL, watch: false, now: { clock })
+        let store = makeStore(now: { clock })
         let home = store.document.locations[0] // ~
         store.recordUse(location: home)
         store.commitVisit(home.expandedPath) // the shell's OSC 7 after the cd
-        XCTAssertEqual(store.document.recent.first { $0.path == home.expandedPath }?.count, 1)
+        XCTAssertEqual(store.recent.recent.first { $0.path == home.expandedPath }?.count, 1)
     }
 
     func testRecordVisitChecksExistenceOffMainAndCommits() async throws {
-        let store = WorkspaceStore(fileURL: fileURL, watch: false, visitDebounce: 0)
+        let store = makeStore(visitDebounce: 0)
         let home = NSHomeDirectory()
         let expectation = expectation(description: "visit committed")
-        let cancellable = store.$document
+        let cancellable = store.$recent
             .filter { $0.recent.contains { $0.path == home } }
             .first()
             .sink { _ in expectation.fulfill() }
@@ -601,27 +630,27 @@ final class WorkspaceStoreTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
         store.recordVisit(URL(fileURLWithPath: home))
         await fulfillment(of: [expectation], timeout: 5)
-        XCTAssertFalse(store.document.recent.contains { $0.path == "/definitely/not/a/real/dir" })
+        XCTAssertFalse(store.recent.recent.contains { $0.path == "/definitely/not/a/real/dir" })
     }
 
     func testRecordVisitIgnoresNonKeyWindows() async throws {
-        let store = WorkspaceStore(fileURL: fileURL, watch: false, visitDebounce: 0)
+        let store = makeStore(visitDebounce: 0)
         store.recordVisit(URL(fileURLWithPath: NSHomeDirectory()), window: nil)
         store.recordVisit(URL(fileURLWithPath: NSHomeDirectory()), window: NSWindow())
         try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertTrue(store.document.recent.isEmpty)
+        XCTAssertTrue(store.recent.recent.isEmpty)
     }
 
     func testRecordVisitIgnoresNonFileAndScratchURLs() {
-        let store = WorkspaceStore(fileURL: fileURL, watch: false, visitDebounce: 0)
+        let store = makeStore(visitDebounce: 0)
         store.recordVisit(nil)
         store.recordVisit(URL(string: "https://example.com/x"))
         store.recordVisit(URL(fileURLWithPath: "/tmp"))
-        XCTAssertTrue(store.document.recent.isEmpty)
+        XCTAssertTrue(store.recent.recent.isEmpty)
     }
 
     func testReloadPicksUpExternalEdits() throws {
-        let store = WorkspaceStore(fileURL: fileURL, watch: false)
+        let store = makeStore()
         let json = """
         {"locations":[{"name":"Synced","path":"~/Synced","pinned":true}],
          "commands":[{"name":"Hello","command":"echo hello","confirm":false}]}
@@ -633,7 +662,7 @@ final class WorkspaceStoreTests: XCTestCase {
     }
 
     func testWatcherReloadsWhenFileReplacedOnDisk() async throws {
-        let store = WorkspaceStore(fileURL: fileURL, watch: true)
+        let store = makeStore(watch: true)
         XCTAssertEqual(store.document.locations.count, 3)
 
         // Simulate a sync tool: write a temp file and rename it over ours.
@@ -664,5 +693,296 @@ final class WorkspaceStoreTests: XCTestCase {
         let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         XCTAssertEqual(attrs[.type] as? FileAttributeType, .typeSymbolicLink)
         XCTAssertEqual(try String(contentsOf: real, encoding: .utf8), "{\"version\":1}\n")
+    }
+}
+
+// MARK: - Sharing workspace.json between machines
+
+final class WorkspaceSyncModelTests: XCTestCase {
+    /// A file written by a newer Slimer / another platform, already in the
+    /// canonical form (every known key present, sorted, pretty printed).
+    private let newerFile = #"""
+    {
+      "commands" : [
+        {
+          "command" : "git status",
+          "confirm" : true,
+          "cwds" : {
+            "windows" : "C:\\Users\\zach\\dev"
+          },
+          "id" : "0F0E4A2E-0B3F-4D3F-8C6B-2A4C9B1D7E22",
+          "name" : "Status",
+          "pinned" : false,
+          "shell" : "pwsh"
+        },
+        {
+          "name" : "no command"
+        }
+      ],
+      "futureTopLevel" : {
+        "list" : [
+          1,
+          2.5,
+          null,
+          true,
+          "x"
+        ]
+      },
+      "locations" : [
+        42,
+        {
+          "id" : "6C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11",
+          "name" : "Backend",
+          "path" : "~/Dev/league-view-backend",
+          "paths" : {
+            "freebsd" : 7,
+            "windows" : "\\\\wsl$\\Ubuntu\\home\\zach\\dev\\league-view-backend"
+          },
+          "pinned" : "yes",
+          "startupConfirm" : true,
+          "tags" : [
+            "work"
+          ],
+          "useCount" : 12
+        },
+        {
+          "name" : "Broken",
+          "path" : ""
+        },
+        {
+          "id" : "7C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11",
+          "name" : "Windows only",
+          "paths" : {
+            "windows" : "C:\\Users\\zach"
+          },
+          "pinned" : false,
+          "startupConfirm" : true
+        }
+      ],
+      "recent" : [
+        {
+          "count" : 3,
+          "lastVisited" : "2026-10-27T09:12:00Z",
+          "path" : "C:\\Users\\zach\\dev"
+        }
+      ],
+      "version" : 1
+    }
+
+    """#
+
+    func testRoundTripIsLossless() throws {
+        let data = Data(newerFile.utf8)
+        let doc = try WorkspaceDocument.decode(data)
+
+        XCTAssertEqual(doc.locations.map(\.name), ["Backend", "Windows only"])
+        XCTAssertEqual(doc.unusableLocations.map(\.index), [0, 2])
+        XCTAssertEqual(doc.commands.map(\.name), ["Status"])
+        XCTAssertEqual(doc.unusableCommands.map(\.index), [1])
+        XCTAssertFalse(doc.locations[0].pinned) // "yes" is not a Bool
+
+        // Byte for byte: unknown document keys, unknown entry keys, a known
+        // key with a value of the wrong type, and unusable entries in place.
+        XCTAssertEqual(String(bytes: try doc.encoded(), encoding: .utf8), newerFile)
+    }
+
+    func testEditsKeepUnknownDataAndPositions() throws {
+        var doc = try WorkspaceDocument.decode(Data(newerFile.utf8))
+        doc.locations[0].name = "Renamed"
+        doc.locations.append(WorkspaceLocation(name: "New", path: "~/new"))
+        let json = try JSONValue.decode(doc.encoded())
+
+        let top = try XCTUnwrap(json.objectValue)
+        XCTAssertEqual(top["futureTopLevel"], try JSONValue.decode(Data(newerFile.utf8)).objectValue?["futureTopLevel"])
+        XCTAssertNotNil(top["recent"])
+        let locations = try XCTUnwrap(top["locations"]?.arrayValue)
+        XCTAssertEqual(locations.count, 5)
+        XCTAssertEqual(locations[0], .int(42))
+        XCTAssertEqual(locations[2].objectValue?["name"], .string("Broken"))
+        let backend = try XCTUnwrap(locations[1].objectValue)
+        XCTAssertEqual(backend["name"], .string("Renamed"))
+        XCTAssertEqual(backend["tags"], .array([.string("work")]))
+        XCTAssertEqual(backend["pinned"], .string("yes"))
+        XCTAssertEqual(backend["useCount"], .int(12))
+        XCTAssertEqual(backend["paths"]?.objectValue?["freebsd"], .int(7))
+        XCTAssertEqual(locations[4].objectValue?["name"], .string("New"))
+
+        // Changing a field with an unusable value replaces it.
+        doc.locations[0].pinned = true
+        let pinned = try JSONValue.decode(doc.encoded()).objectValue?["locations"]?.arrayValue?[1].objectValue?["pinned"]
+        XCTAssertEqual(pinned, .bool(true))
+    }
+
+    func testEntriesWithoutIDGetStableDistinctIDs() throws {
+        let json = #"{"locations":[{"path":"~/a"},{"path":"~/a"},{"path":"~/b"}]}"#
+        let first = try WorkspaceDocument.decode(Data(json.utf8))
+        let second = try WorkspaceDocument.decode(Data(json.utf8))
+        XCTAssertEqual(first.locations.map(\.id), second.locations.map(\.id))
+        XCTAssertEqual(Set(first.locations.map(\.id)).count, 3)
+    }
+
+    func testPerOSPathResolution() throws {
+        let json = #"""
+        {"locations":[
+          {"name":"portable","path":"~/Dev/app"},
+          {"name":"override","path":"~/Dev/app","paths":{"macos":"/Volumes/Work/app","windows":"C:\\dev\\app"}},
+          {"name":"windows-only","paths":{"windows":"C:\\dev\\app"}},
+          {"name":"windows-path","path":"C:\\dev\\app"},
+          {"name":"wsl","path":"\\\\wsl$\\Ubuntu\\home\\zach"},
+          {"name":"blank-mac","path":"/opt","paths":{"macos":"  "}}
+         ],
+         "commands":[
+          {"name":"anywhere","command":"ls"},
+          {"name":"mac","command":"ls","cwds":{"macos":"~/Dev"}},
+          {"name":"win-only","command":"dir","cwds":{"windows":"C:\\dev"}},
+          {"name":"win-cwd","command":"dir","cwd":"C:\\dev"},
+          {"name":"override","command":"ls","cwd":"C:\\dev","cwds":{"macos":"/opt"}}
+         ]}
+        """#
+        let doc = try WorkspaceDocument.decode(Data(json.utf8))
+        XCTAssertEqual(doc.locations.count, 6) // all kept
+        XCTAssertEqual(doc.visibleLocations.map(\.name), ["portable", "override", "blank-mac"])
+        XCTAssertEqual(doc.locations[1].expandedPath, "/Volumes/Work/app")
+        XCTAssertEqual(doc.locations[5].expandedPath, "/opt")
+        XCTAssertEqual(doc.locations[2].name, "windows-only")
+        XCTAssertEqual(Set(doc.rankedLocations().map(\.name)), ["portable", "override", "blank-mac"])
+
+        XCTAssertEqual(doc.visibleCommands.map(\.name), ["anywhere", "mac", "override"])
+        XCTAssertNil(doc.commands[0].currentCwd)
+        XCTAssertEqual(doc.commands[1].currentCwd, "~/Dev")
+        XCTAssertEqual(doc.commands[4].currentCwd, "/opt")
+        XCTAssertEqual(Set(doc.rankedCommands().map(\.name)), ["anywhere", "mac", "override"])
+    }
+
+    func testMovingVisibleEntriesKeepsHiddenSlots() throws {
+        let json = #"{"locations":[{"name":"a","path":"/a"},{"name":"win","path":"C:\\x"},{"name":"b","path":"/b"},{"name":"c","path":"/c"}]}"#
+        var doc = try WorkspaceDocument.decode(Data(json.utf8))
+        // Settings shows a, b, c; drag c to the top.
+        doc.moveVisibleLocations(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+        XCTAssertEqual(doc.locations.map(\.name), ["c", "win", "a", "b"])
+    }
+
+    func testSettingsEditChangesOnlyThisOSPath() throws {
+        let json = #"{"locations":[{"id":"6C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11","name":"app","path":"~/Dev/app","paths":{"macos":"~/Mac/app","windows":"C:\\dev\\app"},"extra":1}]}"#
+        var doc = try WorkspaceDocument.decode(Data(json.utf8))
+        var draft = doc.locations[0]
+        XCTAssertEqual(draft.editablePath, "~/Mac/app")
+        draft.editablePath = "~/Mac/renamed"
+        draft.name = "renamed"
+        doc.locations[0].applyEdits(from: draft)
+
+        let saved = try XCTUnwrap(JSONValue.decode(doc.encoded()).objectValue?["locations"]?.arrayValue?.first?.objectValue)
+        XCTAssertEqual(saved["path"], .string("~/Dev/app"))
+        XCTAssertEqual(saved["paths"], .object(["macos": .string("~/Mac/renamed"), "windows": .string("C:\\dev\\app")]))
+        XCTAssertEqual(saved["extra"], .int(1))
+        XCTAssertEqual(saved["name"], .string("renamed"))
+
+        // Without a macOS override the portable path is edited.
+        var plain = WorkspaceLocation(name: "p", path: "~/p")
+        plain.editablePath = "~/q"
+        XCTAssertEqual(plain.path, "~/q")
+        XCTAssertNil(plain.paths)
+    }
+
+    func testLocalDirectory() {
+        let home = "/Users/tester"
+        XCTAssertEqual(
+            WorkspacePath.localDirectory(environment: [:], home: home).path,
+            "/Users/tester/Library/Application Support/Slimer"
+        )
+        XCTAssertEqual(WorkspacePath.localDirectory(environment: ["XDG_STATE_HOME": "/state"], home: home).path, "/state/slimer")
+        XCTAssertEqual(
+            WorkspacePath.localDirectory(environment: ["XDG_STATE_HOME": "relative"], home: home).path,
+            "/Users/tester/Library/Application Support/Slimer"
+        )
+        let test = WorkspacePath.localDirectory(environment: ["XCTestConfigurationFilePath": "/x"], home: home)
+        XCTAssertTrue(test.path.hasPrefix(URL(fileURLWithPath: NSTemporaryDirectory()).path), test.path)
+        XCTAssertFalse(WorkspaceStore.shared.recentFileURL.path.contains("Application Support"))
+    }
+}
+
+extension WorkspaceStoreTests {
+    func testNewerVersionIsReadOnly() throws {
+        let json = #"{"version":2,"locations":[{"name":"Dev","path":"~/Dev","newThing":{"a":1}}],"commands":[{"command":"ls"}]}"#
+        try writeFile(json)
+        let original = try Data(contentsOf: fileURL)
+
+        let store = makeStore()
+        XCTAssertNil(store.loadError)
+        XCTAssertFalse(store.acceptsEdits)
+        XCTAssertEqual(store.rankedLocations().map(\.name), ["Dev"]) // still shown
+
+        store.recordUse(location: store.document.locations[0])
+        store.recordUse(command: store.document.commands[0])
+        store.edit { $0.locations.removeAll() }
+        store.commitVisit(NSHomeDirectory())
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)
+        XCTAssertEqual(store.document.locations.count, 1)
+    }
+
+    func testRecentMigratesOnlyThisMachinesPathsAndLeavesFileUntouched() throws {
+        let json = #"""
+        {"locations":[],"recent":[
+          {"path":"/Users/me/Dev","count":4,"lastVisited":"2026-10-27T09:12:00Z"},
+          {"path":"C:\\Users\\zach\\dev","count":9,"lastVisited":"2026-10-27T09:12:00Z"},
+          {"path":"\\\\wsl$\\Ubuntu\\home","count":2,"lastVisited":"2026-10-27T09:12:00Z"},
+          {"path":"/Users/me/Other","count":1,"lastVisited":"2026-10-20T09:12:00Z"}
+        ]}
+        """#
+        try writeFile(json)
+        let original = try Data(contentsOf: fileURL)
+
+        let store = makeStore()
+        XCTAssertEqual(Set(store.recent.recent.map(\.path)), ["/Users/me/Dev", "/Users/me/Other"])
+        XCTAssertEqual(store.recent.recent.first { $0.path == "/Users/me/Dev" }?.count, 4)
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)
+
+        // recent.json was written (0600) and the migration is not repeated.
+        let recentFile = localDirectory.appendingPathComponent("recent.json")
+        XCTAssertEqual(try permissions(of: recentFile) & 0o777, 0o600)
+        store.clearRecent()
+        let again = makeStore()
+        XCTAssertTrue(again.recent.recent.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)
+    }
+
+    func testUsageIsStoredLocallyAndWorkspaceFileUnchanged() throws {
+        let json = #"{"locations":[{"id":"6C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11","name":"Home","path":"~","useCount":3,"lastUsed":"2026-01-01T00:00:00Z"}],"commands":[{"id":"0F0E4A2E-0B3F-4D3F-8C6B-2A4C9B1D7E22","command":"ls"}]}"#
+        try writeFile(json)
+        let original = try Data(contentsOf: fileURL)
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let store = makeStore(now: { clock })
+        store.recordUse(location: store.document.locations[0])
+        store.recordUse(command: store.document.commands[0])
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)
+        let usageFile = localDirectory.appendingPathComponent("usage.json")
+        XCTAssertEqual(try permissions(of: usageFile) & 0o777, 0o600)
+        let usage = WorkspaceUsageDocument(json: try JSONValue.decode(Data(contentsOf: usageFile)))
+        let locationID = try XCTUnwrap(UUID(uuidString: "6C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11"))
+        let commandID = try XCTUnwrap(UUID(uuidString: "0F0E4A2E-0B3F-4D3F-8C6B-2A4C9B1D7E22"))
+        XCTAssertEqual(usage.entries[locationID], WorkspaceUsage(count: 4, lastUsed: clock)) // seeded from the file's 3
+        XCTAssertEqual(usage.entries[commandID], WorkspaceUsage(count: 1, lastUsed: clock))
+    }
+
+    func testSettingsEditOfMacPathWritesOnlyThatValue() throws {
+        let json = #"{"locations":[{"id":"6C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11","name":"app","path":"~/Dev/app","paths":{"macos":"~/Mac/app","windows":"C:\\dev\\app"},"useCount":2}]}"#
+        try writeFile(json)
+        let store = makeStore()
+        var draft = store.document.locations[0]
+        draft.editablePath = "~/Mac/moved"
+        // What LocationsEditor does on "Save Location".
+        store.edit { doc in
+            guard let idx = doc.locations.firstIndex(where: { $0.id == draft.id }) else { return }
+            doc.locations[idx].applyEdits(from: draft)
+        }
+
+        let saved = try XCTUnwrap(JSONValue.decode(Data(contentsOf: fileURL)).objectValue?["locations"]?.arrayValue?.first?.objectValue)
+        XCTAssertEqual(saved["path"], .string("~/Dev/app"))
+        XCTAssertEqual(saved["paths"], .object(["macos": .string("~/Mac/moved"), "windows": .string("C:\\dev\\app")]))
+        XCTAssertEqual(saved["useCount"], .int(2))
+        XCTAssertEqual(store.document.locations[0].expandedPath, WorkspacePath.expand("~/Mac/moved"))
     }
 }

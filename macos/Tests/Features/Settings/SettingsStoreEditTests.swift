@@ -50,17 +50,19 @@ struct SettingsStoreEditTests {
     @Test func workspaceEditPersistsAndKeepsUsage() throws {
         let url = try tempURL("workspace.json")
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = WorkspaceStore(fileURL: url, watch: false)
+        let local = url.deletingLastPathComponent().appendingPathComponent("local", isDirectory: true)
+        let store = WorkspaceStore(fileURL: url, localDirectory: local, watch: false)
         #expect(store.acceptsEdits)
         let location = WorkspaceLocation(name: "Src", path: "~/src", shortcut: "cmd+shift+9")
         store.edit { $0.locations.append(location) }
-        store.edit { $0.locations.move(fromOffsets: IndexSet(integer: $0.locations.count - 1), toOffset: 0) }
-        store.edit { $0.recent.removeAll() }
+        store.edit { $0.moveVisibleLocations(fromOffsets: IndexSet(integer: $0.visibleLocations.count - 1), toOffset: 0) }
+        store.commitVisit(NSHomeDirectory())
+        store.clearRecent()
 
-        let reopened = WorkspaceStore(fileURL: url, watch: false)
+        let reopened = WorkspaceStore(fileURL: url, localDirectory: local, watch: false)
         #expect(reopened.document.locations.first?.id == location.id)
         #expect(reopened.document.locations.first?.shortcut == "cmd+shift+9")
-        #expect(reopened.document.recent.isEmpty)
+        #expect(reopened.recent.recent.isEmpty)
     }
 
     @Test func invalidWorkspaceFileRejectsEdits() throws {

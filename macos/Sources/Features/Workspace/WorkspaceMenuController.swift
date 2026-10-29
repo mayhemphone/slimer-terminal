@@ -47,9 +47,11 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
 
         // @Published emits on willSet; hop to the next run loop turn so the
         // store's state is current when we rebuild.
-        Publishers.Merge(
+        Publishers.Merge4(
             store.$document.map { _ in () },
-            store.$loadError.map { _ in () }
+            store.$loadError.map { _ in () },
+            store.$recent.map { _ in () },
+            store.$usage.map { _ in () }
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] in self?.rebuild() }
@@ -100,9 +102,8 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
         checkedBindings = bindingSurface != nil
         menu.removeAllItems()
         let now = Date()
-        let document = store.document
-        let locations = document.rankedLocations(now: now)
-        let commands = document.rankedCommands(now: now)
+        let locations = store.rankedLocations(now: now)
+        let commands = store.rankedCommands(now: now)
 
         // Pinned items at the top level.
         let pinnedLocations = locations.filter(\.pinned)
@@ -139,8 +140,8 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
 
         // Recent
         let recentMenu = NSMenu(title: "Recent")
-        let locationPaths = Set(document.locations.map(\.expandedPath))
-        let recents = document.rankedRecent(now: now)
+        let locationPaths = Set(locations.map(\.expandedPath))
+        let recents = store.rankedRecent(now: now)
             .filter { !locationPaths.contains($0.path) }
             .prefix(Self.recentLimit)
         if recents.isEmpty {

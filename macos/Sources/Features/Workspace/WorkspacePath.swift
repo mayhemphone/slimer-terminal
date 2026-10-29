@@ -1,7 +1,7 @@
 import Foundation
 
 /// Path helpers for the Workspace feature: `~` expansion, abbreviation, and
-/// the location of `workspace.json` (XDG aware).
+/// the location of `workspace.json` and the per-machine files (XDG aware).
 enum WorkspacePath {
     /// Expand a leading `~` (or `~/...`) to the home directory. Other paths
     /// are returned unchanged apart from trailing-slash normalization.
@@ -72,6 +72,29 @@ enum WorkspacePath {
         }
         return configDirectory(environment: environment, home: home)
             .appendingPathComponent("workspace.json", isDirectory: false)
+    }
+
+    /// Where per-machine data (`recent.json`, `usage.json`) lives: never
+    /// synced, unlike `workspace.json`. `$XDG_STATE_HOME/slimer` when that
+    /// variable is an absolute path, otherwise
+    /// `~/Library/Application Support/Slimer`. Under XCTest this is a
+    /// per-process directory in the temporary directory.
+    static func localDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
+    ) -> URL {
+        if isRunningUnderXCTest(environment: environment) {
+            return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                .appendingPathComponent("slimer-xctest-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+                .appendingPathComponent("local", isDirectory: true)
+        }
+        if let xdg = environment["XDG_STATE_HOME"], xdg.hasPrefix("/") {
+            return URL(fileURLWithPath: xdg, isDirectory: true).appendingPathComponent("slimer", isDirectory: true)
+        }
+        return URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("Slimer", isDirectory: true)
     }
 
     /// Prefixes that are never recorded as recent directories: scratch

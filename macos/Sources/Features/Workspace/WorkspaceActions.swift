@@ -65,7 +65,7 @@ enum WorkspaceActions {
         }
 
         var cwdPath: String?
-        if let cwd = command.cwd?.trimmingCharacters(in: .whitespaces), !cwd.isEmpty {
+        if let cwd = command.currentCwd {
             let expanded = WorkspacePath.expand(cwd)
             guard expanded.hasPrefix("/") else {
                 reject("command \"\(command.name)\" cwd is not absolute after ~ expansion")
