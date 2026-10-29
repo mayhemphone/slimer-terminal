@@ -6,29 +6,30 @@ extension View {
     /// Attach the Slimer status bar to a terminal surface view, honoring
     /// `slimer-status-bar`. The bar takes layout space (the terminal grid
     /// shrinks by its height once) and never overlays terminal cells.
-    func slimerStatusBar(_ surfaceView: Ghostty.SurfaceView) -> some View {
-        modifier(SlimerStatusBarModifier(surfaceView: surfaceView))
+    func slimerStatusBar(_ surfaceView: Ghostty.SurfaceView, isSplit: Bool = false) -> some View {
+        modifier(SlimerStatusBarModifier(surfaceView: surfaceView, isSplit: isSplit))
     }
 }
 
 struct SlimerStatusBarModifier: ViewModifier {
     let surfaceView: Ghostty.SurfaceView
+    let isSplit: Bool
 
     @EnvironmentObject private var ghostty: Ghostty.App
+    @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
 
     func body(content: Content) -> some View {
         let position = ghostty.config.slimerStatusBar
-        let fallbackBackground = ghostty.config.backgroundColor
         GeometryReader { geo in
             // Very short panes keep every row for the terminal.
             let show = position != .hidden && SlimerStatusBar.fits(inLeafHeight: geo.size.height)
             VStack(spacing: 0) {
                 if show && position == .top {
-                    SlimerStatusBar(surfaceView: surfaceView, fallbackBackground: fallbackBackground)
+                    bar(position)
                 }
                 content
                 if show && position == .bottom {
-                    SlimerStatusBar(surfaceView: surfaceView, fallbackBackground: fallbackBackground)
+                    bar(position)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -36,6 +37,25 @@ struct SlimerStatusBarModifier: ViewModifier {
         .clipped()
         .onAppear { releaseModelIfHidden(position) }
         .onChange(of: position) { releaseModelIfHidden($0) }
+    }
+
+    /// The bar dims with its pane, like the surface's own unfocused-split overlay,
+    /// so in a stack it reads as part of the terminal above (or below), not the next one.
+    private func bar(_ position: Ghostty.Config.SlimerStatusBarPosition) -> some View {
+        SlimerStatusBar(
+            surfaceView: surfaceView,
+            fallbackBackground: ghostty.config.backgroundColor,
+            edge: position == .top ? .bottom : .top
+        )
+        .overlay {
+            let opacity = ghostty.config.unfocusedSplitOpacity
+            if isSplit && lastFocusedSurface?.value !== surfaceView && opacity > 0 {
+                Rectangle()
+                    .fill(ghostty.config.unfocusedSplitFill)
+                    .opacity(opacity)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     /// Hiding the bar at runtime frees the surface's model and its git
@@ -71,11 +91,16 @@ struct SlimerStatusBar: View {
     @ObservedObject private var model: SlimerStatusBarModel
     private let fallbackBackground: Color
 
+    /// The edge that touches the bar's own terminal. The tint fades in from there,
+    /// so the bar blends into its pane and has a crisp edge only at the split divider.
+    private let edge: VerticalEdge
+
     @State private var showGitPopover = false
 
-    init(surfaceView: Ghostty.SurfaceView, fallbackBackground: Color) {
+    init(surfaceView: Ghostty.SurfaceView, fallbackBackground: Color, edge: VerticalEdge = .top) {
         self.model = SlimerStatusBarModel.model(for: surfaceView)
         self.fallbackBackground = fallbackBackground
+        self.edge = edge
     }
 
     var body: some View {
@@ -108,7 +133,7 @@ struct SlimerStatusBar: View {
         .padding(.horizontal, 6)
         .frame(height: Self.height)
         .frame(maxWidth: .infinity)
-        .background(background.overlay(Color.primary.opacity(0.06)))
+        .background(background.overlay(tint))
         .environment(\.colorScheme, NSColor(background).isLightColor ? .light : .dark)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Terminal status bar")
@@ -116,6 +141,16 @@ struct SlimerStatusBar: View {
 
     private var background: Color {
         model.background ?? fallbackBackground
+    }
+
+    private var tint: some View {
+        Color.primary.opacity(0.09).mask(
+            LinearGradient(
+                stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.6)],
+                startPoint: edge == .top ? .top : .bottom,
+                endPoint: edge == .top ? .bottom : .top
+            )
+        )
     }
 
     // MARK: Chips

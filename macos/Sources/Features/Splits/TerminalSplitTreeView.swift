@@ -99,7 +99,7 @@ private struct TerminalSplitLeaf: View {
             Ghostty.InspectableSurface(
                 surfaceView: surfaceView,
                 isSplit: isSplit)
-            .slimerStatusBar(surfaceView) // slimer: per-surface status bar
+            .slimerStatusBar(surfaceView, isSplit: isSplit) // slimer: per-surface status bar
             .background {
                 // If we're dragging ourself, we hide the entire drop zone. This makes
                 // it so that a released drop animates back to its source properly
