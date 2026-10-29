@@ -17,6 +17,22 @@ tools/autocomplete-specs/
 └── test/             # node --test; fixtures are handwritten, no network needed
 ```
 
+## Starter specs
+
+Until the Fig corpus is converted (that needs owner approval), `starter/` holds
+hand-written Fig-format modules for the CLIs Slimer cares about most (git, cd, ls,
+npm, pnpm, yarn, docker, kubectl, brew, make, ssh, claude, cargo, zig, gh). They are
+Slimer's own work, not withfig data. Generator scripts in them mirror the corpus so
+the engine's native generators recognize them; nothing runs them.
+
+```sh
+node convert.mjs --src starter --out ../../src/autocomplete/data --source-commit slimer-starter
+node validate.mjs ../../src/autocomplete/data
+```
+
+When adding a spec, also add its key to `Spec.embedded` in `src/autocomplete/Spec.zig`
+(a test checks the count against `index.json`).
+
 ## Regenerating from withfig/autocomplete
 
 1. Check out the corpus at the commit you want to ship and build it there (it needs its
