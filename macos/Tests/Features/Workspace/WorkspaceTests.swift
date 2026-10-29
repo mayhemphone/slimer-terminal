@@ -154,6 +154,16 @@ final class WorkspaceFrecencyTests: XCTestCase {
         XCTAssertTrue(doc.recent.contains { $0.path == "/dir\(WorkspaceFrecency.recentLimit + 19)" })
     }
 
+    func testJustVisitedDirectoryIsNeverEvicted() {
+        var doc = WorkspaceDocument()
+        for i in 0..<WorkspaceFrecency.recentLimit {
+            for _ in 0..<20 { doc.recordVisit(path: "/busy\(i)", now: now) }
+        }
+        doc.recordVisit(path: "/brand-new", now: now.addingTimeInterval(-40 * 86_400))
+        XCTAssertEqual(doc.recent.count, WorkspaceFrecency.recentLimit)
+        XCTAssertTrue(doc.recent.contains { $0.path == "/brand-new" })
+    }
+
     func testLocationsPinnedFirstThenFrecencyThenName() {
         var doc = WorkspaceDocument(locations: [
             WorkspaceLocation(name: "zeta", path: "/z"),
@@ -209,6 +219,38 @@ final class WorkspaceShellTests: XCTestCase {
     func testTextBindingActionEscapesBackslashesAndAppendsEnter() {
         XCTAssertEqual(WorkspaceShell.textBindingAction("cd 'a'", pressEnter: true), "text:cd 'a'\\r")
         XCTAssertEqual(WorkspaceShell.textBindingAction("echo a\\b", pressEnter: false), "text:echo a\\\\b")
+    }
+
+    func testTypedPathsRejectQuotesAndBackslashes() {
+        // fish treats \' and \\ as escapes inside single quotes; such a path
+        // must never be typed.
+        let evil = "/Users/me/a\\'; touch PWNED #"
+        XCTAssertFalse(WorkspaceShell.isSafeToType(path: evil))
+        XCTAssertFalse(WorkspaceShell.isSafeToType(path: "/Users/me/back\\slash"))
+        XCTAssertFalse(WorkspaceShell.isSafeToType(path: "/Users/me/it's"))
+        XCTAssertFalse(WorkspaceShell.isSafeToType(path: "/Users/me/x\u{202E}y"))
+        XCTAssertTrue(WorkspaceShell.isSafeToType(path: "/Users/me/My Dev (2) $HOME;*"))
+        // Still a fine working_directory (no shell involved).
+        XCTAssertTrue(WorkspaceShell.isSafeToInsert(evil))
+    }
+
+    func testTextBindingActionClearLinePrefixesCtrlU() {
+        XCTAssertEqual(
+            WorkspaceShell.textBindingAction("cd '/a'", clearLine: true, pressEnter: true),
+            "text:\\x15cd '/a'\\r"
+        )
+        XCTAssertEqual(
+            WorkspaceShell.textBindingAction("git status", clearLine: true, pressEnter: false),
+            "text:\\x15git status"
+        )
+    }
+
+    func testIsSafeToInsertRejectsFormatCharacters() {
+        let scalars: [Character] = ["\u{200E}", "\u{200F}", "\u{061C}", "\u{FEFF}", "\u{200B}", "\u{200D}", "\u{00AD}", "\u{E0041}"]
+        for scalar in scalars {
+            XCTAssertFalse(WorkspaceShell.isSafeToInsert("a\(scalar)b"), "should reject \(scalar.unicodeScalars.first!.value)")
+        }
+        XCTAssertFalse(WorkspaceShell.isSafeToInsert("x\u{2029}y"))
     }
 
     func testIsSafeToInsertRejectsControlAndBidi() {
@@ -274,6 +316,24 @@ final class WorkspacePathTests: XCTestCase {
         XCTAssertFalse(WorkspacePath.isRecordable("/private/tmp/x"))
         XCTAssertTrue(WorkspacePath.isRecordable("/tmpfoo"))
         XCTAssertFalse(WorkspacePath.isRecordable("relative"))
+        XCTAssertFalse(WorkspacePath.isRecordable("~/Dev"))
+        XCTAssertFalse(WorkspacePath.isRecordable("/Volumes/USB/x"))
+        XCTAssertFalse(WorkspacePath.isRecordable("/net/host/share"))
+        XCTAssertFalse(WorkspacePath.isRecordable("/Network/Servers/x"))
+        XCTAssertTrue(WorkspacePath.isRecordable("/Volumesque"))
+        XCTAssertFalse(WorkspacePath.isRecordable("/" + String(repeating: "a", count: 1024)))
+        XCTAssertTrue(WorkspacePath.isRecordable("/" + String(repeating: "a", count: 1000)))
+        XCTAssertFalse(WorkspacePath.isRecordable("/Users/me/evil\u{202E}dir"))
+        XCTAssertFalse(WorkspacePath.isRecordable("/Users/me/new\nline"))
+    }
+
+    func testXCTestUsesThrowawayFile() {
+        XCTAssertTrue(WorkspacePath.isRunningUnderXCTest())
+        let url = WorkspacePath.defaultFileURL(environment: ["XCTestConfigurationFilePath": "/x"], home: home)
+        XCTAssertTrue(url.path.hasPrefix(URL(fileURLWithPath: NSTemporaryDirectory()).path), url.path)
+        XCTAssertFalse(url.path.contains("/.config/slimer"))
+        // The test host app's own store is not on the real file either.
+        XCTAssertFalse(WorkspaceStore.shared.fileURL.path.contains("/.config/slimer/"))
     }
 }
 
@@ -303,6 +363,111 @@ final class WorkspaceShortcutTests: XCTestCase {
         XCTAssertNil(WorkspaceShortcut(parsing: "cmd+shift"))
         XCTAssertNil(WorkspaceShortcut(parsing: "cmd+a+b"))
         XCTAssertNil(WorkspaceShortcut(parsing: "cmd+nosuchkey"))
+    }
+}
+
+final class WorkspaceShortcutPolicyTests: XCTestCase {
+    func testRequiresCommand() {
+        XCTAssertNil(WorkspaceShortcut.accepted("ctrl+1", log: false) { _ in false })
+        XCTAssertNil(WorkspaceShortcut.accepted("alt+shift+g", log: false) { _ in false })
+        XCTAssertNil(WorkspaceShortcut.accepted("f5", log: false) { _ in false })
+        XCTAssertNil(WorkspaceShortcut.accepted(nil, log: false) { _ in false })
+        XCTAssertNil(WorkspaceShortcut.accepted("  ", log: false) { _ in false })
+        XCTAssertNotNil(WorkspaceShortcut.accepted("cmd+shift+1", log: false) { _ in false })
+    }
+
+    func testRejectsExistingGhosttyBinding() {
+        var asked: [WorkspaceShortcut] = []
+        let result = WorkspaceShortcut.accepted("cmd+t", log: false) { shortcut in
+            asked.append(shortcut)
+            return true
+        }
+        XCTAssertNil(result)
+        XCTAssertEqual(asked.count, 1)
+        XCTAssertEqual(asked.first?.ghosttyKey, "t")
+    }
+
+    func testGhosttyKeyMapping() throws {
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+shift+1")?.ghosttyKey, "digit1")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+one")?.ghosttyKey, "digit1")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+a")?.ghosttyKey, "a")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+a")?.unshiftedCodepoint, 0x61)
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+enter")?.ghosttyKey, "enter")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+enter")?.unshiftedCodepoint, 0)
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+comma")?.ghosttyKey, "comma")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+[")?.ghosttyKey, "bracketLeft")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+f12")?.ghosttyKey, "f12")
+        XCTAssertEqual(WorkspaceShortcut(parsing: "cmd+up")?.ghosttyKey, "arrowUp")
+        // Every mapped key is a real Ghostty key.
+        for spec in ["cmd+shift+1", "cmd+a", "cmd+enter", "cmd+comma", "cmd+[", "cmd+f12", "cmd+up", "cmd+page_down", "cmd+`"] {
+            let key = try XCTUnwrap(WorkspaceShortcut(parsing: spec)?.ghosttyKey, spec)
+            XCTAssertNotNil(Ghostty.Input.Key(rawValue: key), spec)
+        }
+    }
+
+    func testAlternateModifiers() throws {
+        let base = try XCTUnwrap(WorkspaceShortcut(parsing: "cmd+shift+1"))
+        let alt = base.with(modifiers: base.modifiers.union(.option))
+        XCTAssertEqual(alt.keyEquivalent, "1")
+        XCTAssertEqual(alt.modifiers, [.command, .shift, .option])
+        XCTAssertEqual(alt.ghosttyKey, "digit1")
+        XCTAssertNotEqual(alt, base)
+    }
+}
+
+final class WorkspaceDisplayTests: XCTestCase {
+    func testCommandTitleShowsHiddenCommandText() {
+        XCTAssertEqual(WorkspaceDisplay.commandTitle(WorkspaceCommand(name: "Claude", command: "claude")), "Claude")
+        XCTAssertEqual(
+            WorkspaceDisplay.commandTitle(WorkspaceCommand(name: "git status", command: "git status --short")),
+            "git status"
+        )
+        XCTAssertEqual(
+            WorkspaceDisplay.commandTitle(WorkspaceCommand(name: "Deploy", command: "rm -rf ~")),
+            "Deploy — rm -rf ~"
+        )
+        let long = String(repeating: "x", count: 100)
+        let title = WorkspaceDisplay.commandTitle(WorkspaceCommand(name: "Long", command: long))
+        XCTAssertEqual(title, "Long — " + String(repeating: "x", count: 59) + "…")
+    }
+
+    func testAutoRunMarker() {
+        XCTAssertEqual(
+            WorkspaceDisplay.commandTitle(WorkspaceCommand(name: "Status", command: "git status", confirm: false)),
+            "Status — git status ⏎"
+        )
+        let auto = WorkspaceLocation(name: "Dev", path: "/dev", startupCommand: "claude", startupConfirm: false)
+        XCTAssertEqual(WorkspaceDisplay.locationTitle(auto), "Dev ⏎")
+        XCTAssertTrue(WorkspaceDisplay.locationDetail(auto).hasSuffix("→ claude ⏎"))
+
+        let gated = WorkspaceLocation(name: "Dev", path: "/dev", startupCommand: "claude")
+        XCTAssertEqual(WorkspaceDisplay.locationTitle(gated), "Dev")
+        XCTAssertEqual(WorkspaceDisplay.locationDetail(gated), "/dev  → claude")
+        XCTAssertEqual(WorkspaceDisplay.locationDetail(WorkspaceLocation(name: "Dev", path: "/dev")), "/dev")
+    }
+}
+
+final class WorkspaceStartupTests: XCTestCase {
+    func testStartupConfirmDefaultsTrueAndRoundTrips() throws {
+        let doc = try WorkspaceDocument.decode(Data(#"{"locations":[{"path":"/x","startupCommand":"claude"}]}"#.utf8))
+        XCTAssertEqual(doc.locations.first?.startupConfirm, true)
+        var changed = doc
+        changed.locations[0].startupConfirm = false
+        XCTAssertEqual(try WorkspaceDocument.decode(changed.encoded()).locations.first?.startupConfirm, false)
+    }
+
+    func testStartupCommandIsTypedWithoutEnterUnlessOptedOut() {
+        let gated = WorkspaceActions.surfaceConfiguration(path: "/x", startup: ("claude", true))
+        XCTAssertEqual(gated.workingDirectory, "/x")
+        XCTAssertEqual(gated.initialInput, "claude")
+
+        let auto = WorkspaceActions.surfaceConfiguration(path: "/x", startup: ("claude", false))
+        XCTAssertEqual(auto.initialInput, "claude\n")
+
+        // An untypeable path is still fine as a working directory.
+        let none = WorkspaceActions.surfaceConfiguration(path: "/a\\'b", startup: nil)
+        XCTAssertEqual(none.workingDirectory, "/a\\'b")
+        XCTAssertNil(none.initialInput)
     }
 }
 
@@ -380,10 +545,11 @@ final class WorkspaceStoreTests: XCTestCase {
         // Using a location also counts as visiting its directory.
         XCTAssertTrue(reloaded.document.recent.contains { $0.path == location.expandedPath })
 
-        // Visits: nonexistent paths are ignored, existing ones are counted once per minute.
-        store.commitVisit("/definitely/not/a/real/dir")
-        XCTAssertFalse(store.document.recent.contains { $0.path == "/definitely/not/a/real/dir" })
+        // Existence is checked (off the main thread) before committing.
+        XCTAssertFalse(WorkspaceStore.directoryExists("/definitely/not/a/real/dir"))
+        XCTAssertTrue(WorkspaceStore.directoryExists(NSHomeDirectory()))
 
+        // Visits are counted once per minute.
         let home = NSHomeDirectory()
         store.commitVisit(home)
         store.commitVisit(home)
@@ -394,6 +560,61 @@ final class WorkspaceStoreTests: XCTestCase {
 
         let persisted = WorkspaceStore(fileURL: fileURL, watch: false)
         XCTAssertEqual(persisted.document.recent.first { $0.path == home }?.count, 2)
+    }
+
+    func testSaveReappliesChangeOnTopOfUnseenExternalEdit() throws {
+        // Whole-second clock: the file stores ISO 8601 dates without fractions.
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = WorkspaceStore(fileURL: fileURL, watch: false, now: { clock })
+        let command = store.document.commands[2] // git status
+        // Hand edit (not yet delivered by a watcher): rename and add a location.
+        var external = store.document
+        external.commands[2].name = "Status (edited)"
+        external.locations.append(WorkspaceLocation(name: "Added", path: "/added"))
+        try external.encoded().write(to: fileURL)
+
+        store.recordUse(command: command)
+
+        let onDisk = try WorkspaceDocument.decode(Data(contentsOf: fileURL))
+        XCTAssertTrue(onDisk.locations.contains { $0.name == "Added" })
+        let saved = try XCTUnwrap(onDisk.commands.first { $0.id == command.id })
+        XCTAssertEqual(saved.name, "Status (edited)")
+        XCTAssertEqual(saved.useCount, 1)
+        XCTAssertEqual(store.document, onDisk)
+    }
+
+    func testRecordUseOfLocationDoesNotDoubleCountTheFollowingShellReport() {
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = WorkspaceStore(fileURL: fileURL, watch: false, now: { clock })
+        let home = store.document.locations[0] // ~
+        store.recordUse(location: home)
+        store.commitVisit(home.expandedPath) // the shell's OSC 7 after the cd
+        XCTAssertEqual(store.document.recent.first { $0.path == home.expandedPath }?.count, 1)
+    }
+
+    func testRecordVisitChecksExistenceOffMainAndCommits() async throws {
+        let store = WorkspaceStore(fileURL: fileURL, watch: false, visitDebounce: 0)
+        let home = NSHomeDirectory()
+        let expectation = expectation(description: "visit committed")
+        let cancellable = store.$document
+            .filter { $0.recent.contains { $0.path == home } }
+            .first()
+            .sink { _ in expectation.fulfill() }
+        defer { cancellable.cancel() }
+        store.recordVisit(URL(fileURLWithPath: "/definitely/not/a/real/dir"))
+        // Let the first report finish its stat; it must not be recorded.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        store.recordVisit(URL(fileURLWithPath: home))
+        await fulfillment(of: [expectation], timeout: 5)
+        XCTAssertFalse(store.document.recent.contains { $0.path == "/definitely/not/a/real/dir" })
+    }
+
+    func testRecordVisitIgnoresNonKeyWindows() async throws {
+        let store = WorkspaceStore(fileURL: fileURL, watch: false, visitDebounce: 0)
+        store.recordVisit(URL(fileURLWithPath: NSHomeDirectory()), window: nil)
+        store.recordVisit(URL(fileURLWithPath: NSHomeDirectory()), window: NSWindow())
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(store.document.recent.isEmpty)
     }
 
     func testRecordVisitIgnoresNonFileAndScratchURLs() {

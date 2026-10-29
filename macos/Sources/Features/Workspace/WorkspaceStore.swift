@@ -29,20 +29,29 @@ final class WorkspaceStore: ObservableObject {
 
     private let now: () -> Date
     private let visitDebounce: TimeInterval
+    /// The bytes we last read from or successfully wrote to disk. Anything
+    /// else on disk is an external edit.
     private var lastWrittenData: Data?
     private var watcher: WorkspaceFileWatcher?
-    private var pendingVisit: Task<Void, Never>?
+    private var pendingVisit: DispatchWorkItem?
+    private var visitGeneration = 0
     private var lastCommittedVisit: (path: String, date: Date)?
 
+    /// Queue for `stat` calls on shell-reported (untrusted) paths so a slow
+    /// or hung filesystem never blocks the main thread.
+    private static let statQueue = DispatchQueue(label: "slimer.workspace.stat", qos: .utility)
+
     /// - Parameters:
-    ///   - fileURL: the JSON file. Defaults to the XDG-aware location.
-    ///   - watch: whether to reload when the file changes on disk.
+    ///   - fileURL: the JSON file. Defaults to the XDG-aware location (a temp
+    ///     file under XCTest).
+    ///   - watch: whether to reload when the file changes on disk. Off by
+    ///     default under XCTest.
     ///   - visitDebounce: how long a directory must stay current before it
     ///     counts as a visit.
     ///   - now: clock, injectable for tests.
     init(
         fileURL: URL = WorkspacePath.defaultFileURL(),
-        watch: Bool = true,
+        watch: Bool = !WorkspacePath.isRunningUnderXCTest(),
         visitDebounce: TimeInterval = 1.5,
         now: @escaping () -> Date = Date.init
     ) {
@@ -54,7 +63,7 @@ final class WorkspaceStore: ObservableObject {
         switch Self.read(fileURL) {
         case .missing:
             document = .seed()
-            save()
+            writeCurrentDocument()
             Self.logger.info("seeded \(fileURL.path, privacy: .public)")
         case .loaded(let doc, let data):
             document = doc
@@ -84,7 +93,7 @@ final class WorkspaceStore: ObservableObject {
     func openInEditor() {
         if !FileManager.default.fileExists(atPath: fileURL.path) {
             loadError = nil
-            save()
+            writeCurrentDocument()
         }
         NSWorkspace.shared.open(fileURL)
     }
@@ -92,45 +101,63 @@ final class WorkspaceStore: ObservableObject {
     /// Count a use of a location (also counts a visit to its directory).
     func recordUse(location: WorkspaceLocation) {
         let date = now()
-        guard document.recordUse(locationID: location.id, now: date) else { return }
         let path = location.expandedPath
-        if WorkspacePath.isRecordable(path) {
-            document.recordVisit(path: path, now: date)
+        let recordVisit = WorkspacePath.isRecordable(path)
+        if recordVisit {
+            // The shell will report this directory right after the cd; don't
+            // count it twice.
+            lastCommittedVisit = (path, date)
         }
-        save()
+        mutate { doc in
+            guard doc.recordUse(locationID: location.id, now: date) else { return }
+            if recordVisit { doc.recordVisit(path: path, now: date) }
+        }
     }
 
     /// Count a use of a saved command.
     func recordUse(command: WorkspaceCommand) {
-        guard document.recordUse(commandID: command.id, now: now()) else { return }
-        save()
+        let date = now()
+        mutate { doc in doc.recordUse(commandID: command.id, now: date) }
     }
 
-    /// Called whenever the focused terminal's working directory changes. The
-    /// visit is committed only if the directory stays current for
-    /// `visitDebounce` seconds, exists, and is not a scratch location.
+    /// Called whenever a terminal's working directory changes. Only reports
+    /// from the key window count. The path is shell-reported (untrusted), so
+    /// it is filtered with cheap string checks here, the existence check runs
+    /// off the main thread after `visitDebounce`, and the visit is committed
+    /// back on the main thread if nothing newer arrived meanwhile.
+    func recordVisit(_ url: URL?, window: NSWindow?) {
+        guard window?.isKeyWindow == true else { return }
+        recordVisit(url)
+    }
+
+    /// See `recordVisit(_:window:)`; this variant skips the key-window check.
     func recordVisit(_ url: URL?) {
         pendingVisit?.cancel()
         pendingVisit = nil
+        visitGeneration += 1
         guard let url, url.isFileURL else { return }
         let path = WorkspacePath.expand(url.path)
         guard WorkspacePath.isRecordable(path) else { return }
-        let delay = visitDebounce
-        pendingVisit = Task { @MainActor [weak self] in
-            if delay > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+
+        let generation = visitGeneration
+        let work = DispatchWorkItem { [weak self] in
+            Self.statQueue.async {
+                let exists = Self.directoryExists(path)
+                DispatchQueue.main.async {
+                    guard let self, exists, generation == self.visitGeneration else { return }
+                    self.commitVisit(path)
+                }
             }
-            guard !Task.isCancelled else { return }
-            self?.commitVisit(path)
         }
+        pendingVisit = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, visitDebounce), execute: work)
     }
 
-    /// Commit a visit immediately (the debounced tail of `recordVisit`).
+    /// Commit a visit to a path already verified to exist. Repeat visits to
+    /// the same directory within a minute are counted once.
     func commitVisit(_ path: String) {
         pendingVisit = nil
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
-              isDirectory.boolValue else { return }
+        guard WorkspacePath.isRecordable(path) else { return }
         let date = now()
         if let last = lastCommittedVisit,
            last.path == path,
@@ -138,8 +165,14 @@ final class WorkspaceStore: ObservableObject {
             return
         }
         lastCommittedVisit = (path, date)
-        document.recordVisit(path: path, now: date)
-        save()
+        mutate { doc in doc.recordVisit(path: path, now: date) }
+    }
+
+    /// Whether `path` is an existing directory. Blocking; never call on main
+    /// for untrusted paths.
+    static func directoryExists(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     // MARK: - Disk
@@ -173,7 +206,7 @@ final class WorkspaceStore: ObservableObject {
             loadError = nil
             document = .seed()
             lastWrittenData = nil
-            save()
+            writeCurrentDocument()
         case .loaded(let doc, let data):
             loadError = nil
             if !force, data == lastWrittenData { return }
@@ -185,7 +218,34 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    private func save() {
+    /// Apply a change and persist it. If the file changed on disk since we
+    /// last read or wrote it (an edit the watcher has not delivered yet), the
+    /// disk version is loaded first and the change is re-applied on top, so
+    /// external edits are never overwritten. While the file is invalid the
+    /// change stays in memory only.
+    private func mutate(_ change: (inout WorkspaceDocument) -> Void) {
+        if loadError == nil {
+            switch Self.read(fileURL) {
+            case .loaded(let disk, let data) where data != lastWrittenData:
+                document = disk
+                lastWrittenData = data
+            case .invalid(let message):
+                loadError = message
+                Self.logger.error("workspace.json became invalid; keeping changes in memory: \(message, privacy: .public)")
+            case .missing, .loaded:
+                break
+            }
+        }
+
+        var doc = document
+        change(&doc)
+        if doc != document { document = doc }
+        writeCurrentDocument()
+    }
+
+    /// Write `document` unless the on-disk file is invalid or already holds
+    /// these exact bytes.
+    private func writeCurrentDocument() {
         guard loadError == nil else {
             Self.logger.warning("not saving workspace.json because the on-disk file is invalid")
             return
@@ -193,8 +253,8 @@ final class WorkspaceStore: ObservableObject {
         do {
             let data = try document.encoded()
             if data == lastWrittenData { return }
-            lastWrittenData = data
             try Self.writeAtomically(data, to: fileURL)
+            lastWrittenData = data
         } catch {
             Self.logger.error("failed to save workspace.json: \(error, privacy: .public)")
         }

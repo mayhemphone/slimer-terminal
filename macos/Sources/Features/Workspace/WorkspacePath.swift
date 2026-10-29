@@ -51,21 +51,46 @@ enum WorkspacePath {
             .appendingPathComponent("slimer", isDirectory: true)
     }
 
-    /// The default `workspace.json` location.
+    /// Whether the process is an XCTest host. The app's own store then uses
+    /// a throwaway file so tests never seed or watch the real workspace.json.
+    static func isRunningUnderXCTest(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    /// The default `workspace.json` location. Under XCTest this is a
+    /// per-process file in the temporary directory.
     static func defaultFileURL(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         home: String = NSHomeDirectory()
     ) -> URL {
-        configDirectory(environment: environment, home: home).appendingPathComponent("workspace.json", isDirectory: false)
+        if isRunningUnderXCTest(environment: environment) {
+            return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                .appendingPathComponent("slimer-xctest-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+                .appendingPathComponent("workspace.json", isDirectory: false)
+        }
+        return configDirectory(environment: environment, home: home)
+            .appendingPathComponent("workspace.json", isDirectory: false)
     }
 
-    /// Prefixes that are never recorded as recent directories.
-    static let ignoredRecentPrefixes = ["/tmp", "/private/tmp", "/private/var/folders", "/var/folders"]
+    /// Prefixes that are never recorded as recent directories: scratch
+    /// locations, plus network and removable volumes (a `stat` there can hang).
+    static let ignoredRecentPrefixes = [
+        "/tmp", "/private/tmp", "/private/var/folders", "/var/folders",
+        "/net", "/Network", "/Volumes",
+    ]
 
-    /// Whether a working directory report is worth remembering. This does not
-    /// check existence; callers do that at commit time.
+    /// Longest path we accept from a working-directory report.
+    static let maxRecordablePathLength = 1024
+
+    /// Whether a working directory report (untrusted, shell-provided) is worth
+    /// remembering. Pure string checks, cheap enough for the main thread; the
+    /// existence check happens later off the main thread.
     static func isRecordable(_ path: String) -> Bool {
         guard path.hasPrefix("/"), path != "/" else { return false }
+        guard path.utf8.count <= maxRecordablePathLength else { return false }
+        guard WorkspaceShell.isSafeToInsert(path) else { return false }
         for prefix in ignoredRecentPrefixes where path == prefix || path.hasPrefix(prefix + "/") {
             return false
         }

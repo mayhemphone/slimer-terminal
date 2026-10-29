@@ -17,13 +17,20 @@ enum WorkspacePaletteOptions {
         let document = store.document
         var options: [CommandOption] = []
 
+        // Only shortcuts that the menu actually registers are shown.
+        let isBound: (WorkspaceShortcut) -> Bool = { shortcut in
+            guard let surface = surfaceView.surfaceModel else { return false }
+            return WorkspaceShortcut.isGhosttyBinding(shortcut, on: surface)
+        }
+
         // Go to: <name> (path)
         for location in document.rankedLocations(now: now) {
-            let path = WorkspacePath.abbreviate(location.expandedPath)
-            let symbols = location.shortcut.flatMap { WorkspaceShortcut(parsing: $0)?.symbols }
+            let detail = WorkspaceDisplay.locationDetail(location)
+            let title = WorkspaceDisplay.locationTitle(location)
+            let symbols = WorkspaceShortcut.accepted(location.shortcut, log: false, isBound: isBound)?.symbols
             options.append(CommandOption(
-                title: "Go to: \(location.name)",
-                subtitle: path,
+                title: "Go to: \(title)",
+                subtitle: detail,
                 description: goToDescription,
                 symbols: symbols,
                 leadingIcon: location.icon ?? "folder",
@@ -37,8 +44,8 @@ enum WorkspacePaletteOptions {
             // palette cannot show modifier-dependent actions.
             if location.pinned {
                 options.append(CommandOption(
-                    title: "Go to (new tab): \(location.name)",
-                    subtitle: path,
+                    title: "Go to (new tab): \(title)",
+                    subtitle: detail,
                     description: "Open a new tab in this directory.",
                     leadingIcon: "plus.rectangle.on.folder",
                     leadingColor: color(location.color)
@@ -54,9 +61,9 @@ enum WorkspacePaletteOptions {
             if let cwd = command.cwd, !cwd.isEmpty {
                 subtitle += "  (in \(WorkspacePath.abbreviate(WorkspacePath.expand(cwd))))"
             }
-            let symbols = command.shortcut.flatMap { WorkspaceShortcut(parsing: $0)?.symbols }
+            let symbols = WorkspaceShortcut.accepted(command.shortcut, log: false, isBound: isBound)?.symbols
             options.append(CommandOption(
-                title: "Run: \(command.name)",
+                title: "Run: \(WorkspaceDisplay.commandTitle(command))",
                 subtitle: subtitle,
                 description: command.confirm
                     ? "Type the command into this terminal; press Enter to run it."
@@ -70,7 +77,9 @@ enum WorkspacePaletteOptions {
             })
         }
 
-        // Recent: <path> (skip directories that already are locations)
+        // Recent: <path> (skip directories that already are locations).
+        // Learned from the shell, so these always open in a new tab and are
+        // never typed into a terminal.
         let locationPaths = Set(document.locations.map(\.expandedPath))
         let recents = document.rankedRecent(now: now)
             .filter { !locationPaths.contains($0.path) }
@@ -79,10 +88,10 @@ enum WorkspacePaletteOptions {
             let path = recent.path
             options.append(CommandOption(
                 title: "Recent: \(WorkspacePath.abbreviate(path))",
-                description: goToDescription,
+                description: "Open a new tab in this directory.",
                 leadingIcon: "clock"
             ) {
-                WorkspaceActions.open(path: path, mode: optionHeld ? .newTab : .here, from: surfaceView)
+                WorkspaceActions.openRecent(path, mode: .newTab, from: surfaceView)
             })
         }
 

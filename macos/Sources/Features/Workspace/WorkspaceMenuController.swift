@@ -23,6 +23,10 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
     private let menu = NSMenu(title: "Workspace")
     private var cancellables: Set<AnyCancellable> = []
     private var installed = false
+    /// Whether the last rebuild could check shortcuts against Ghostty's
+    /// keybindings (needs a live surface). If not, we rebuild once a terminal
+    /// window becomes key.
+    private var checkedBindings = false
 
     init(store: WorkspaceStore) {
         self.store = store
@@ -51,12 +55,49 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
         .sink { [weak self] in self?.rebuild() }
         .store(in: &cancellables)
 
+        // Keybindings can change with the Ghostty config.
+        NotificationCenter.default.publisher(for: .ghosttyConfigDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.rebuild() }
+            .store(in: &cancellables)
+
+        // Shortcut collision checks need a surface; retry when one appears.
+        NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+            .sink { [weak self] _ in
+                guard let self, !self.checkedBindings, self.bindingSurface != nil else { return }
+                self.rebuild()
+            }
+            .store(in: &cancellables)
+
         rebuild()
     }
 
     // MARK: - Building
 
+    /// Any live surface, used to ask libghostty about keybindings (they are
+    /// app-wide config, so any surface answers the same).
+    private var bindingSurface: Ghostty.Surface? {
+        TerminalController.preferredParent?.focusedSurface?.surfaceModel
+            ?? TerminalController.all.lazy.compactMap { $0.focusedSurface?.surfaceModel }.first
+    }
+
+    /// Apply the shortcut policy (must contain ⌘, must not be a Ghostty
+    /// keybinding).
+    private func acceptedShortcut(_ string: String?) -> WorkspaceShortcut? {
+        let surface = bindingSurface
+        return WorkspaceShortcut.accepted(string) { shortcut in
+            guard let surface else { return false }
+            return WorkspaceShortcut.isGhosttyBinding(shortcut, on: surface)
+        }
+    }
+
+    private func isFree(_ shortcut: WorkspaceShortcut) -> Bool {
+        guard let surface = bindingSurface else { return true }
+        return !WorkspaceShortcut.isGhosttyBinding(shortcut, on: surface)
+    }
+
     private func rebuild() {
+        checkedBindings = bindingSurface != nil
         menu.removeAllItems()
         let now = Date()
         let document = store.document
@@ -131,11 +172,11 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
     }
 
     private func addLocationItems(_ location: WorkspaceLocation, to menu: NSMenu, withShortcut: Bool) {
-        let shortcut = withShortcut ? location.shortcut.flatMap(WorkspaceShortcut.init(parsing:)) : nil
-        let tooltip = WorkspacePath.abbreviate(location.expandedPath)
+        let shortcut = withShortcut ? acceptedShortcut(location.shortcut) : nil
+        let tooltip = WorkspaceDisplay.locationDetail(location)
 
         let primary = actionItem(
-            title: location.name,
+            title: WorkspaceDisplay.locationTitle(location),
             action: .location(location, .here),
             shortcut: shortcut
         )
@@ -144,7 +185,7 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
         menu.addItem(primary)
 
         if let alternate = alternateItem(
-            title: "\(location.name) in New Tab",
+            title: "\(WorkspaceDisplay.locationTitle(location)) in New Tab",
             action: .location(location, .newTab),
             shortcut: shortcut
         ) {
@@ -154,19 +195,17 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
         }
     }
 
+    /// Recent directories are learned from the shell, so they always open in
+    /// a new tab (never typed into a terminal).
     private func addRecentItems(_ path: String, to menu: NSMenu) {
-        let title = WorkspacePath.abbreviate(path)
-        let primary = actionItem(title: title, action: .recent(path, .here), shortcut: nil)
-        primary.toolTip = path
+        let primary = actionItem(title: WorkspacePath.abbreviate(path), action: .recent(path, .newTab), shortcut: nil)
+        primary.toolTip = "Open a new tab in \(path)"
         menu.addItem(primary)
-        if let alternate = alternateItem(title: "\(title) in New Tab", action: .recent(path, .newTab), shortcut: nil) {
-            menu.addItem(alternate)
-        }
     }
 
     private func commandItem(_ command: WorkspaceCommand, withShortcut: Bool) -> NSMenuItem {
-        let shortcut = withShortcut ? command.shortcut.flatMap(WorkspaceShortcut.init(parsing:)) : nil
-        let item = actionItem(title: command.name, action: .command(command), shortcut: shortcut)
+        let shortcut = withShortcut ? acceptedShortcut(command.shortcut) : nil
+        let item = actionItem(title: WorkspaceDisplay.commandTitle(command), action: .command(command), shortcut: shortcut)
         item.toolTip = command.confirm
             ? "\(command.command)  (press Enter to run)"
             : "\(command.command)  (runs immediately)"
@@ -186,17 +225,21 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
         return item
     }
 
-    /// An ⌥-alternate for `actionItem`. Returns nil when the primary shortcut
-    /// already uses Option and Shift, since the masks could not differ.
+    /// An ⌥-alternate for `actionItem`. Without a shortcut the alternate has
+    /// no key equivalent (it only appears while ⌥ is held in an open menu).
+    /// With a (⌘) shortcut, the ⌥ variant must also be free in Ghostty;
+    /// returns nil if it is taken or the shortcut already uses ⌥.
     private func alternateItem(title: String, action: MenuAction, shortcut: WorkspaceShortcut?) -> NSMenuItem? {
-        let base = shortcut?.modifiers ?? []
-        var mask = base.union(.option)
-        if mask == base {
-            mask.insert(.shift)
-            if mask == base { return nil }
+        guard let shortcut else {
+            let item = actionItem(title: title, action: action, shortcut: nil)
+            item.keyEquivalentModifierMask = .option
+            item.isAlternate = true
+            return item
         }
-        let item = actionItem(title: title, action: action, shortcut: shortcut)
-        item.keyEquivalentModifierMask = mask
+        guard shortcut.hasCommand, !shortcut.modifiers.contains(.option) else { return nil }
+        let alternate = shortcut.with(modifiers: shortcut.modifiers.union(.option))
+        guard isFree(alternate) else { return nil }
+        let item = actionItem(title: title, action: action, shortcut: alternate)
         item.isAlternate = true
         return item
     }
@@ -226,7 +269,7 @@ final class WorkspaceMenuController: NSObject, NSMenuItemValidation {
         case .location(let location, let mode):
             WorkspaceActions.open(location, mode: mode, store: store)
         case .recent(let path, let mode):
-            WorkspaceActions.open(path: path, mode: mode)
+            WorkspaceActions.openRecent(path, mode: mode)
         case .command(let command):
             WorkspaceActions.run(command, store: store)
         case .openFile:

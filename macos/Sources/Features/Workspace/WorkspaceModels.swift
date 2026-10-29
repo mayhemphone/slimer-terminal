@@ -19,8 +19,12 @@ struct WorkspaceLocation: Codable, Identifiable, Hashable {
     var pinned: Bool
     /// Ghostty-style shortcut, e.g. `cmd+shift+1`.
     var shortcut: String?
-    /// Command to run when the location is opened in a new tab/split/window.
+    /// Command typed into the shell when the location is opened in a new
+    /// tab/split/window.
     var startupCommand: String?
+    /// When true (the default) the startup command is only typed and the user
+    /// presses Enter. When false, Enter is pressed too.
+    var startupConfirm: Bool
     /// Usage statistics for frecency ranking.
     var useCount: Int
     var lastUsed: Date?
@@ -34,6 +38,7 @@ struct WorkspaceLocation: Codable, Identifiable, Hashable {
         pinned: Bool = false,
         shortcut: String? = nil,
         startupCommand: String? = nil,
+        startupConfirm: Bool = true,
         useCount: Int = 0,
         lastUsed: Date? = nil
     ) {
@@ -45,6 +50,7 @@ struct WorkspaceLocation: Codable, Identifiable, Hashable {
         self.pinned = pinned
         self.shortcut = shortcut
         self.startupCommand = startupCommand
+        self.startupConfirm = startupConfirm
         self.useCount = useCount
         self.lastUsed = lastUsed
     }
@@ -63,12 +69,21 @@ struct WorkspaceLocation: Codable, Identifiable, Hashable {
         self.pinned = c.tolerantDecode(Bool.self, forKey: .pinned) ?? false
         self.shortcut = c.tolerantDecode(String.self, forKey: .shortcut)
         self.startupCommand = c.tolerantDecode(String.self, forKey: .startupCommand)
+        self.startupConfirm = c.tolerantDecode(Bool.self, forKey: .startupConfirm) ?? true
         self.useCount = max(0, c.tolerantDecode(Int.self, forKey: .useCount) ?? 0)
         self.lastUsed = c.tolerantDecode(Date.self, forKey: .lastUsed)
     }
 
     /// The path with `~` expanded.
     var expandedPath: String { WorkspacePath.expand(path) }
+
+    /// The startup command without surrounding whitespace, or nil if empty.
+    var trimmedStartupCommand: String? {
+        guard let cmd = startupCommand?.trimmingCharacters(in: .whitespaces), !cmd.isEmpty else { return nil }
+        return cmd
+    }
+
+    var hasStartupCommand: Bool { trimmedStartupCommand != nil }
 }
 
 /// A saved shell command.
@@ -268,7 +283,12 @@ struct WorkspaceDocument: Codable, Equatable {
             recent.append(WorkspaceRecentDirectory(path: path, count: 1, lastVisited: now))
         }
         if recent.count > WorkspaceFrecency.recentLimit {
-            recent = Array(rankedRecent(now: now).prefix(WorkspaceFrecency.recentLimit))
+            // Never evict the directory that was just visited: a brand-new
+            // entry has the lowest possible count and could otherwise be
+            // dropped immediately.
+            let others = rankedRecent(now: now).filter { $0.path != path }
+            let visited = recent.filter { $0.path == path }
+            recent = Array(others.prefix(WorkspaceFrecency.recentLimit - visited.count)) + visited
         }
     }
 
