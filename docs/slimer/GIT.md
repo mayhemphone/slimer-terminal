@@ -99,8 +99,8 @@ for non-repositories, excluded paths, or when the service is disabled.
 ## Security posture
 
 - **Read-only.** The app itself runs only `rev-parse`, `status`, `stash list` and
-  `for-each-ref` (plus `remote get-url origin` from the status bar popover, see
-  `STATUSBAR.md`). Mutating commands are never executed by the app.
+  `for-each-ref` (plus `remote` and `remote get-url origin` from the status bar
+  popover, see `STATUSBAR.md`). Mutating commands are never executed by the app.
 - **git lookup:** only on `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, in that
   order (Homebrew git is preferred; it starts faster than Apple's shim). The user's
   `$PATH` is never consulted. `/usr/bin/git` is accepted only when `xcode-select -p`
@@ -128,10 +128,12 @@ and `createBranch(named:)` (`git switch -c <b>`). Each has `title`, `systemImage
 `isAvailable(for:)` and `commandLine(for:) throws -> String`.
 
 Names are shell-quoted: plain `[A-Za-z0-9_./@-]` words pass through as-is; anything
-else is single-quoted with `'` written as `'\''`. Names that are empty, start with
-`-`, or contain C0/C1 controls, DEL, U+2028/2029 or bidi controls are rejected (the
-call throws). They are never stripped. The UI inserts the text into the terminal and
-sends Enter only after an explicit confirm click.
+else is single-quoted. Names that are empty, start with `-`, contain `'` or `\`
+(fish interprets `\'` and `\\` inside single quotes), or contain characters
+rejected by `SlimerUnsafeText` (Unicode Cc, Cf including bidi controls, Zl, Zp) are
+rejected (the call throws). They are never stripped. The UI inserts the text into
+the terminal and sends Enter only after an explicit click on Run at an empty
+prompt (see `STATUSBAR.md`).
 
 ## Measured latency
 

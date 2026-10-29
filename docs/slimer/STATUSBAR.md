@@ -30,17 +30,26 @@ Claude glyph (when Claude is the foreground process) and the Claude button.
 | File | Hunk |
 | --- | --- |
 | `Features/Splits/TerminalSplitTreeView.swift` | 1 line: `.slimerStatusBar(surfaceView)` on `TerminalSplitLeaf`'s `InspectableSurface`. |
-| `Ghostty/Ghostty.App.swift` | 1 line in `commandFinished`: `SlimerCommandFinished.post(...)`. |
-| `App/AppDelegate.swift` | 1 line: `SlimerClaudeMenu.install()` (see `CLAUDE.md`). |
+| `Ghostty/Ghostty.App.swift` | 1 line in `commandFinished`: `SlimerCommandFinished.post(...)`; 1 line in `initialSize`: add the bar height so `window-height` rows are kept. |
+| `src/apprt/embedded.zig`, `include/ghostty.h` | `ghostty_surface_slimer_idle_prompt` (logic in `src/slimer/prompt.zig`, tests imported from `src/main_ghostty.zig`). |
+| `App/AppDelegate.swift` | 1 line: `SlimerClaudeMenu.install()` (see `CLAUDE-LAUNCHER.md`). |
 | `src/config/Config.zig` | `slimer-status-bar` key and `SlimerStatusBar` enum. |
 
 The modifier wraps the leaf in a `VStack`, so the bar takes layout space and the
-terminal grid shrinks once by 22pt; it never overlays cells.
+terminal grid shrinks once by 22pt; it never overlays cells. Leaves shorter than
+three bar heights hide the bar. Setting `slimer-status-bar = hidden` at runtime
+also frees each surface's model (and its git subscription). The bar's background
+follows the surface's own background (runtime OSC 11 color, else its config), so
+per-tab themes match.
 
 ## Data flow
 
 `SlimerStatusBarModel` (one per surface, stored as an associated object so it
-survives split-tree rebuilds) is the only thing the bar observes. The
+survives split-tree rebuilds) is the only thing the bar observes. The surface
+retains the model, so no model subscription may retain the surface:
+`NotificationCenter.publisher(for:object:)` is not used (it holds `object`
+strongly); notifications are filtered against a weak owner instead
+(`SlimerStatusBarModelTests` checks the surface deallocates). The
 `SurfaceView` publishes on mouse movement and cursor changes, so the bar never
 observes it directly. Inputs:
 
@@ -68,16 +77,26 @@ Choosing an action or branch never runs anything. It shows the exact command lin
 and three buttons:
 
 - **Insert** (Return): types the command.
-- **Run**: types the command and presses Enter. Disabled while the surface has a
-  foreground process (`needsConfirmQuit`).
+- **Run**: types the command and presses Enter.
 - **Cancel** (Esc).
+
+Both depend on `ghostty_surface_slimer_idle_prompt` (`src/slimer/prompt.zig`),
+which is true only when the child is alive, the surface is not read-only, OSC 133
+shell integration shows the cursor in a primary prompt's input area (not a PS2
+continuation), and no input text is on the prompt rows. When it is false, Run is
+disabled with a tooltip explaining why, and Insert becomes **Insert Anyway**, an
+explicit confirmation that types the command after whatever is there (never with
+Enter). The state is re-checked on click; if it changed, nothing is typed and the
+popover says so. Nothing ever clears the user's input line (no Ctrl-U).
 
 Insertion uses `ghostty_surface_binding_action` with `text:`. The parameter is a
 Zig string literal body (`src/config/string.zig`), so backslashes are doubled and
-nothing else needs escaping. At an idle prompt the text is prefixed with Ctrl-U
-(`\x15`) to clear the line; with a foreground process there is no Ctrl-U and never
-Enter (`SlimerTerminalInput.plan`). Commands with control characters, DEL,
-U+2028/2029 or bidi controls are rejected.
+nothing else needs escaping. Commands containing characters rejected by
+`SlimerUnsafeText` (Unicode Cc, Cf including bidi controls, Zl, Zp) are refused,
+and the popover shows an error instead of closing. Branch names with `'` or `\`
+are rejected by `GitShellQuoting` (fish interprets them inside single quotes).
+Branch names are shown with unsafe characters replaced by U+FFFD, and "Copy
+Branch Name" is offered only for safe names.
 
 Links:
 
@@ -89,6 +108,7 @@ Links:
   The PR link is `https://github.com/<owner>/<repo>/pull/new/<branch>` with the
   branch percent-encoded. Only `https://github.com` URLs are opened.
 
-The popover adds two read-only git invocations to those listed in `GIT.md`:
-`for-each-ref --format=%(refname) refs/heads refs/remotes` and
-`remote get-url origin`.
+The popover adds three read-only git invocations to those listed in `GIT.md`:
+`for-each-ref --format=%(refname) refs/heads refs/remotes`, `remote` (remote
+names, so remotes containing `/` are stripped correctly from remote branch
+names) and `remote get-url origin`.
