@@ -553,8 +553,12 @@ extension Ghostty {
             // We always require the notification to be attached to a surface.
             guard let uuidString = userInfo["surface"] as? String,
                   let uuid = UUID(uuidString: uuidString),
-                  let surface = delegate?.findSurface(forUUID: uuid),
-                  let window = surface.window else { return false }
+                  let surface = delegate?.findSurface(forUUID: uuid) else { return false }
+            // slimer: a surface in a hidden quick terminal tab has no window but
+            // is still live; always present its notifications.
+            guard let window = surface.window else {
+                return BaseTerminalController.controller(owning: surface) is QuickTerminalController
+            }
 
             // If we don't require focus then we're good!
             let requireFocus = userInfo["requireFocus"] as? Bool ?? true

@@ -40,7 +40,7 @@ extension QuickTerminalController {
             guard let self, let index = tabs.index(of: id), let tab = tabs[index] else { return }
             closeTab(tab)
         }
-        tabBarModel.onNew = { [weak self] in self?.newTab() }
+        tabBarModel.onNew = { [weak self] in self?.newTabFromFocusedSurface() }
 
         let center = NotificationCenter.default
         center.addObserver(
@@ -85,8 +85,10 @@ extension QuickTerminalController {
     /// Returns true when the change was fully handled here and the drawer must not
     /// hide (an emptied tab was replaced by a neighbor).
     func tabsDidChangeSurfaceTree(to tree: SplitTree<Ghostty.SurfaceView>) -> Bool {
-        // A tab switch assigns the tree itself; nothing to sync.
-        if isSwitchingTabs { return false }
+        // A tab switch assigns the tree itself; nothing to sync. Returning true
+        // also keeps a switch from showing a hidden drawer: callers that should
+        // show it (new tab, present terminal, focus) call animateIn themselves.
+        if isSwitchingTabs { return true }
 
         if tree.isEmpty {
             guard let selected = tabs.selected else { return false }
@@ -114,6 +116,28 @@ extension QuickTerminalController {
             let tab = Tab(surfaceTree: tree, focusedSurface: focusedSurface)
             tabs.insert(tab)
             observeTab(tab)
+            // A fresh drawer starts without the old tab's title override.
+            titleOverride = nil
+            refreshTabBar()
+            return false
+        }
+
+        if !selected.surfaceTree.isEmpty && !selected.sharesSurfaces(with: tree) {
+            // A tree with none of the selected tab's surfaces is the undo of a
+            // tab that emptied (e.g. its only split was dragged to another
+            // window). Restore it as its own tab instead of overwriting the
+            // selected one.
+            for view in selected.surfaceTree {
+                sendToBackground(view)
+            }
+            // focusedSurface still points into the other tab here; undo moves
+            // focus into the restored tree right after, which updates this.
+            let tab = Tab(surfaceTree: tree, focusedSurface: tree.first)
+            let index = tabs.insert(tab)
+            observeTab(tab)
+            tabs.select(index: index)
+            titleOverride = nil
+            applyColorScheme(to: tree)
             refreshTabBar()
             return false
         }
@@ -169,7 +193,11 @@ extension QuickTerminalController {
             return
         }
 
+        // The tab being left. Nil when it was already removed (it emptied), in
+        // which case the model has already moved the selection to `newTab`.
+        var leavingTab: Tab?
         if let oldTab = tabs.selected, oldTab !== newTab {
+            leavingTab = oldTab
             oldTab.focusedSurface = focusedSurface ?? oldTab.focusedSurface
             for view in oldTab.surfaceTree {
                 sendToBackground(view)
@@ -179,14 +207,22 @@ extension QuickTerminalController {
         tabs.select(index: index)
 
         // See the file comment: split undo targets this controller and assigns
-        // `surfaceTree` directly, so it cannot survive a tab switch.
-        undoManager?.removeAllActions(withTarget: self)
+        // `surfaceTree` directly, so it cannot survive a tab switch. When the
+        // leaving tab is already gone (its last split was dragged to another
+        // window), keep the undo: it belongs to a grouped "Move Split" and
+        // restoring it re-creates the tab (see tabsDidChangeSurfaceTree).
+        if leavingTab != nil {
+            undoManager?.removeAllActions(withTarget: self)
+        }
 
         isSwitchingTabs = true
         surfaceTree = newTab.surfaceTree
         isSwitchingTabs = false
 
         titleOverride = newTab.titleOverride
+
+        // Hidden tabs miss light/dark changes; bring them up to date.
+        applyColorScheme(to: newTab.surfaceTree)
 
         let target = newTab.focusedSurface ?? newTab.surfaceTree.first
         focusedSurface = target
@@ -210,7 +246,31 @@ extension QuickTerminalController {
         }
     }
 
+    /// Set the current app light/dark scheme on each surface in the tree.
+    /// `updateColorSchemeForSurfaceTree` caches the last applied scheme and only
+    /// covers the visible tree, so surfaces in hidden tabs can be stale.
+    func applyColorScheme(to tree: SplitTree<Ghostty.SurfaceView>) {
+        let scheme: ghostty_color_scheme_e = NSApplication.shared.effectiveAppearance.isDark
+            ? GHOSTTY_COLOR_SCHEME_DARK
+            : GHOSTTY_COLOR_SCHEME_LIGHT
+        for view in tree {
+            if let surface = view.surface {
+                ghostty_surface_set_color_scheme(surface, scheme)
+            }
+        }
+    }
+
     // MARK: New / Close
+
+    /// New tab that inherits the focused surface's config (working directory),
+    /// going through the same `new_tab` action path as the keybinding.
+    func newTabFromFocusedSurface() {
+        if let surface = focusedSurface?.surface {
+            ghostty.newTab(surface: surface)
+        } else {
+            newTab()
+        }
+    }
 
     /// Create a new drawer tab after the selected one and show it.
     func newTab(baseConfig base: Ghostty.SurfaceConfiguration? = nil) {
@@ -271,6 +331,9 @@ extension QuickTerminalController {
         tabObservers[removed.id] = nil
         for view in removed.surfaceTree {
             sendToBackground(view)
+            // The base controller no longer sees these surfaces; deny any
+            // pending clipboard request like closing a split would.
+            cancelPendingClipboardConfirmation(for: view)
         }
 
         // The undo closure retains the tab, and therefore its surfaces, until it
@@ -321,7 +384,7 @@ extension QuickTerminalController {
             .valuesPublisher(valueKeyPath: \.bell, publisherKeyPath: \.$bell)
             .map { $0.values.contains(true) }
 
-        tabObservers[tab.id] = focused.$title
+        let titleAndBell = focused.$title
             .combineLatest(bells)
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak tab] title, bell in
@@ -330,6 +393,27 @@ extension QuickTerminalController {
                 tab.bell = bell
                 refreshTabBar()
             }
+
+        // The base controller only watches the visible tree for clipboard
+        // requests. For hidden tabs, ring the surface's bell so the tab shows
+        // it; the request stays pending and is presented once the tab is shown
+        // and the surface is focused.
+        let clipboard = Publishers.MergeMany(tab.surfaceTree.map { surface in
+            surface.$pendingClipboardConfirmation
+                .map { [weak surface] request in (surface, request != nil) }
+                .eraseToAnyPublisher()
+        })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak tab] surface, pending in
+                guard let self, let tab, let surface, pending,
+                      tab !== tabs.selected, !surface.bell else { return }
+                NotificationCenter.default.post(name: .ghosttyBellDidRing, object: surface)
+            }
+
+        tabObservers[tab.id] = AnyCancellable {
+            titleAndBell.cancel()
+            clipboard.cancel()
+        }
     }
 
     func refreshTabBar() {

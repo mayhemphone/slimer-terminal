@@ -344,7 +344,9 @@ class BaseTerminalController: NSWindowController,
     ///
     /// Subclasses should call super first.
     func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
-        for surfaceView in from where !to.contains(surfaceView) {
+        // slimer: surfaces the controller still owns (quick terminal tabs that
+        // are hidden, not closed) keep their pending clipboard requests.
+        for surfaceView in from where !to.contains(surfaceView) && !ownsSurface(surfaceView) {
             cancelPendingClipboardConfirmation(for: surfaceView)
         }
 
@@ -1667,7 +1669,9 @@ extension BaseTerminalController {
         onConfirmClipboardRequest(request, for: target)
     }
 
-    private func cancelPendingClipboardConfirmation(for target: Ghostty.SurfaceView) {
+    // slimer: internal (was private) so quick terminal tabs can cancel requests
+    // for surfaces removed outside the visible tree.
+    func cancelPendingClipboardConfirmation(for target: Ghostty.SurfaceView) {
         if let confirmation = clipboardConfirmation,
            confirmation.confirmation.surface === target {
             dismissClipboardConfirmation(confirmation)

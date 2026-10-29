@@ -321,8 +321,13 @@ class QuickTerminalController: BaseTerminalController {
         }
 
         // slimer: with more than one tab, closing the last leaf closes this tab.
+        // A dead process isn't kept alive for undo.
         if tabs.count > 1, let tab = tabs.selected {
-            closeTab(tab, withConfirmation: withConfirmation)
+            if surface.processExited {
+                removeTab(tab, registerUndo: false)
+            } else {
+                closeTab(tab, withConfirmation: withConfirmation)
+            }
             return
         }
 
@@ -343,14 +348,24 @@ class QuickTerminalController: BaseTerminalController {
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil
     ) -> Ghostty.SurfaceView? {
+        // slimer: AppleScript/App Intents may target a surface in a hidden tab.
+        selectTab(containing: oldView)
         var config = config ?? Ghostty.SurfaceConfiguration()
         config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
         return super.newSplit(at: oldView, direction: direction, baseConfig: config)
     }
 
-    // slimer: background tabs are owned by this controller too.
+    // slimer: AppleScript/App Intents may target a surface in a hidden tab.
+    override func closeSurface(_ view: Ghostty.SurfaceView, withConfirmation: Bool = true) {
+        selectTab(containing: view)
+        super.closeSurface(view, withConfirmation: withConfirmation)
+    }
+
+    // slimer: background tabs are owned by this controller too. The selected
+    // tab is checked through `surfaceTree` because its stored tree is stale
+    // during `surfaceTree.didSet`.
     override func ownsSurface(_ view: Ghostty.SurfaceView) -> Bool {
-        tabs.contains(view)
+        surfaceTree.contains(view) || tabs.containsInBackground(view)
     }
 
     // slimer: remember per-tab focus so switching back restores it.
@@ -763,7 +778,7 @@ class QuickTerminalController: BaseTerminalController {
 
     @IBAction func newTab(_ sender: Any?) {
         // slimer: the drawer supports tabs.
-        newTab()
+        newTabFromFocusedSurface()
     }
 
     @IBAction func toggleGhosttyFullScreen(_ sender: Any) {

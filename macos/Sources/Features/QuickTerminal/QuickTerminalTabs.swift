@@ -53,6 +53,11 @@ final class QuickTerminalTab<ViewType: NSView & Codable & Identifiable>: Identif
     func contains(_ view: ViewType) -> Bool {
         surfaceTree.contains(view)
     }
+
+    /// True if this tab and `tree` have at least one surface in common.
+    func sharesSurfaces(with tree: SplitTree<ViewType>) -> Bool {
+        tree.contains { surfaceTree.contains($0) }
+    }
 }
 
 /// The ordered list of drawer tabs plus the selection.
@@ -113,6 +118,14 @@ struct QuickTerminalTabs<ViewType: NSView & Codable & Identifiable> {
 
     func contains(_ view: ViewType) -> Bool {
         index(containing: view) != nil
+    }
+
+    /// True if a tab other than the selected one holds the view. The controller
+    /// combines this with the visible tree so that ownership is correct even in
+    /// the middle of `surfaceTree.didSet`, before the selected tab is synced.
+    func containsInBackground(_ view: ViewType) -> Bool {
+        let selected = self.selected
+        return tabs.contains { $0 !== selected && $0.contains(view) }
     }
 
     // MARK: Mutation

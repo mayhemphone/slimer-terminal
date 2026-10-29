@@ -1852,6 +1852,12 @@ extension Ghostty {
             let id = notification.request.identifier
             guard self.notificationIdentifiers.remove(id) != nil else { return }
             if focus {
+                // slimer: the quick terminal must select the surface's tab and
+                // slide in; its focusSurface does both.
+                if let quick = BaseTerminalController.controller(owning: self) as? QuickTerminalController {
+                    quick.focusSurface(self)
+                    return
+                }
                 self.window?.makeKeyAndOrderFront(self)
                 Ghostty.moveFocus(to: self)
             }

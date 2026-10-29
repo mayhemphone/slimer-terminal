@@ -68,18 +68,28 @@ running, exactly as upstream does. With two or more tabs, closing the last
 split in a tab closes that tab and shows its neighbor.
 
 Closing a tab is undoable (`cmd+z`) for the `undo-timeout` window; the tab's
-processes keep running until the undo expires. Split-level undo is dropped
-when you switch tabs because Ghostty's split undo assumes a single tree per
-window.
+processes keep running until the undo expires. A tab whose shell exited is
+removed without an undo entry. Split-level undo is dropped when you switch
+tabs because Ghostty's split undo assumes a single tree per window. Dragging
+a tab's only split into another window is the exception: undoing that move
+brings the split back as its own drawer tab.
+
+The tab bar's `+` and the New Tab menu item inherit the focused terminal's
+working directory, like `cmd+t`.
 
 ## Background tabs
 
 Terminals in tabs you are not looking at keep running. They are marked
 unfocused and occluded so libghostty does not render them. If a process in a
 background tab exits, that split is removed; if the tab becomes empty it is
-removed too, without touching the tab you are looking at. A bell in a
-background tab shows a bell icon on its tab. `present_terminal` (for example
-clicking a desktop notification) brings the right tab forward.
+removed too, without touching the tab you are looking at or showing a hidden
+drawer. A bell in a background tab shows a bell icon on its tab; so does a
+pending clipboard-access request, which is presented when you switch to that
+tab. Light/dark theme changes are applied to a background tab when it is
+shown. Clicking a desktop notification from a drawer terminal, or
+`present_terminal`, selects that tab and slides the drawer in. AppleScript
+and App Intents commands that target a terminal in a hidden tab select the
+tab first.
 
 ## Position changes
 

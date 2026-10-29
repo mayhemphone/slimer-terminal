@@ -978,6 +978,15 @@ class AppDelegate: NSObject,
             }
         }
 
+        // slimer: include every quick terminal tab, not just the visible one.
+        if case .initialized(let quick) = quickTerminalControllerState {
+            for tab in quick.tabs.tabs {
+                for view in tab.surfaceTree where view.id == uuid {
+                    return view
+                }
+            }
+        }
+
         return nil
     }
 

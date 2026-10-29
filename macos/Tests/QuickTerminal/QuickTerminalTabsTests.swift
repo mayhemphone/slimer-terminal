@@ -242,6 +242,34 @@ struct QuickTerminalTabsTests {
         #expect(tabs.index(for: .last) == 0)
     }
 
+    // MARK: Ownership helpers
+
+    @Test func containsInBackgroundExcludesSelectedTab() throws {
+        let (tabs, all) = makeTabs(3, selected: 1)
+        let selectedView = try #require(all[1].surfaceTree.first)
+        let backgroundView = try #require(all[2].surfaceTree.first)
+        #expect(!tabs.containsInBackground(selectedView))
+        #expect(tabs.containsInBackground(backgroundView))
+        #expect(!tabs.containsInBackground(MockView()))
+    }
+
+    @Test func containsInBackgroundAfterSelectionMoves() throws {
+        var (tabs, all) = makeTabs(2, selected: 0)
+        let firstView = try #require(all[0].surfaceTree.first)
+        tabs.select(index: 1)
+        #expect(tabs.containsInBackground(firstView))
+    }
+
+    @Test func sharesSurfacesDetectsForeignTrees() throws {
+        let view1 = MockView()
+        let view2 = MockView()
+        let tab = Tab(view: view1)
+        let split = try SplitTree(view: view1).inserting(view: view2, at: view1, direction: .down)
+        #expect(tab.sharesSurfaces(with: split))
+        #expect(!tab.sharesSurfaces(with: SplitTree(view: MockView())))
+        #expect(!tab.sharesSurfaces(with: SplitTree()))
+    }
+
     // MARK: Tab bar visibility
 
     @Test func tabBarVisibility() {
