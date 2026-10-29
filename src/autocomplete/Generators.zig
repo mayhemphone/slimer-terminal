@@ -8,18 +8,25 @@
 //! - package.json scripts: the nearest `package.json` walking up.
 //! - make targets: a `^target:` scan of the Makefile in the cwd.
 //!
-//! Results are cached per (kind, cwd) for one second.
+//! Results are cached per (kind, cwd) for one second; package.json and
+//! Makefile results are kept past that while the file's mtime is
+//! unchanged. Files are read through `Fs.readRegular` (non-blocking open,
+//! regular files only), and nothing runs on non-local filesystems.
 const Generators = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Native = @import("Spec.zig").Native;
+const Fs = @import("Fs.zig");
 
 pub const ttl_ns: i96 = std.time.ns_per_s;
 pub const max_items = 2000;
 pub const max_make_targets = 200;
 const max_file_bytes = 1024 * 1024;
+/// packed-refs can be large in big repos: read at most this much and
+/// parse the complete lines in it.
+pub const max_packed_refs_bytes = 8 * 1024 * 1024;
 const max_ref_depth = 8;
 const slots = 8;
 
@@ -37,6 +44,16 @@ pub const Result = struct {
     items: []const Item,
     fetched: Io.Timestamp,
     last_used: u64,
+    /// The file the items came from (package.json, Makefile) and its
+    /// mtime, so an expired entry is reused while the file is unchanged.
+    source: ?[]const u8 = null,
+    source_mtime: i96 = 0,
+};
+
+/// What a generator read, for mtime-based reuse.
+const Source = struct {
+    path: ?[]const u8 = null,
+    mtime: i96 = 0,
 };
 
 alloc: Allocator,
@@ -65,6 +82,13 @@ pub fn get(self: *Generators, kind: Native, cwd: []const u8, now: Io.Timestamp) 
             r.last_used = self.tick;
             return r.items;
         }
+        if (r.source) |src| if (Fs.infoRegular(src)) |info| {
+            if (info.mtime_ns == r.source_mtime) {
+                r.fetched = now;
+                r.last_used = self.tick;
+                return r.items;
+            }
+        } else |_| {};
         r.arena.deinit();
         self.alloc.destroy(r);
         slot.* = null;
@@ -82,14 +106,17 @@ pub fn get(self: *Generators, kind: Native, cwd: []const u8, now: Io.Timestamp) 
     const a = r.arena.allocator();
     r.cwd = a.dupe(u8, cwd) catch "";
     var items: std.ArrayList(Item) = .empty;
-    if (cwd.len > 0 and cwd[0] == '/') {
+    var source: Source = .{};
+    if (cwd.len > 0 and cwd[0] == '/' and Fs.isLocal(cwd)) {
         switch (kind) {
             .git_branches, .git_remotes, .git_tags => gitRefs(a, self.io, cwd, kind, &items) catch {},
-            .package_scripts => packageScripts(a, self.io, cwd, &items) catch {},
-            .make_targets => makeTargets(a, self.io, cwd, &items) catch {},
+            .package_scripts => packageScripts(a, self.io, cwd, &items, &source) catch {},
+            .make_targets => makeTargets(a, self.io, cwd, &items, &source) catch {},
         }
     }
     r.items = items.items;
+    r.source = source.path;
+    r.source_mtime = source.mtime;
 
     var victim: usize = 0;
     var oldest: u64 = std.math.maxInt(u64);
@@ -110,7 +137,8 @@ pub fn get(self: *Generators, kind: Native, cwd: []const u8, now: Io.Timestamp) 
 }
 
 fn readSmall(a: Allocator, io: Io, path: []const u8) ![]u8 {
-    return Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_file_bytes));
+    _ = io;
+    return Fs.readRegular(a, path, max_file_bytes);
 }
 
 const GitDirs = struct {
@@ -268,7 +296,13 @@ fn packedRefs(
     kind: PackedKind,
 ) !void {
     const path = try std.fs.path.join(a, &.{ common, "packed-refs" });
-    const text = readSmall(a, io, path) catch return;
+    _ = io;
+    const blob = Fs.readRegularPrefix(a, path, max_packed_refs_bytes) catch return;
+    // A file cut at the cap ends mid-line: parse only complete lines.
+    const text = if (blob.len == max_packed_refs_bytes)
+        blob[0..(std.mem.lastIndexOfScalar(u8, blob, '\n') orelse 0)]
+    else
+        blob;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         if (out.items.len >= max_items) return;
@@ -300,12 +334,15 @@ fn packedRefs(
     }
 }
 
-fn packageScripts(a: Allocator, io: Io, cwd: []const u8, out: *std.ArrayList(Item)) !void {
+fn packageScripts(a: Allocator, io: Io, cwd: []const u8, out: *std.ArrayList(Item), source: *Source) !void {
     var dir: []const u8 = cwd;
     var depth: usize = 0;
     const text = while (depth < 64) : (depth += 1) {
         const p = try std.fs.path.join(a, &.{ dir, "package.json" });
-        if (readSmall(a, io, p)) |t| break t else |_| {}
+        if (readSmall(a, io, p)) |t| {
+            source.* = .{ .path = p, .mtime = if (Fs.infoRegular(p)) |i| i.mtime_ns else |_| 0 };
+            break t;
+        } else |_| {}
         const parent = std.fs.path.dirname(dir) orelse return;
         if (parent.len == dir.len) return;
         dir = parent;
@@ -326,10 +363,13 @@ fn packageScripts(a: Allocator, io: Io, cwd: []const u8, out: *std.ArrayList(Ite
     }
 }
 
-fn makeTargets(a: Allocator, io: Io, cwd: []const u8, out: *std.ArrayList(Item)) !void {
+fn makeTargets(a: Allocator, io: Io, cwd: []const u8, out: *std.ArrayList(Item), source: *Source) !void {
     const text = for ([_][]const u8{ "GNUmakefile", "makefile", "Makefile" }) |name| {
         const p = try std.fs.path.join(a, &.{ cwd, name });
-        if (readSmall(a, io, p)) |t| break t else |_| {}
+        if (readSmall(a, io, p)) |t| {
+            source.* = .{ .path = p, .mtime = if (Fs.infoRegular(p)) |i| i.mtime_ns else |_| 0 };
+            break t;
+        } else |_| {}
     } else return;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -375,6 +415,35 @@ fn expectNames(items: []const Item, expected: []const []const u8) !void {
 fn tmpPath(tmp: *std.testing.TmpDir, buf: []u8) ![]const u8 {
     const n = try tmp.dir.realPath(std.testing.io, buf);
     return buf[0..n];
+}
+
+test "autocomplete generators: packed-refs past the cap keeps complete lines" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const d = tmp.dir;
+    try d.createDirPath(io, "repo/.git/refs/heads");
+    try d.writeFile(io, .{ .sub_path = "repo/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    const line = "0123456789012345678901234567890123456789 refs/heads/b";
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(testing.allocator);
+    var i: usize = 0;
+    while (data.items.len < max_packed_refs_bytes + 4096) : (i += 1) {
+        try data.print(testing.allocator, "{s}{d}\n", .{ line, i });
+    }
+    try d.writeFile(io, .{ .sub_path = "repo/.git/packed-refs", .data = data.items });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmpPath(&tmp, &buf);
+    const cwd = try std.fs.path.join(testing.allocator, &.{ root, "repo" });
+    defer testing.allocator.free(cwd);
+    var g: Generators = .init(testing.allocator, io);
+    defer g.deinit();
+    const br = g.get(.git_branches, cwd, .{ .nanoseconds = 0 });
+    // Capped at max_items, and every name is complete (no torn line).
+    try testing.expectEqual(@as(usize, max_items), br.len);
+    for (br) |it| try testing.expect(std.mem.startsWith(u8, it.name, "b"));
 }
 
 test "autocomplete generators: git refs from a fake repo" {
@@ -484,6 +553,18 @@ test "autocomplete generators: package.json scripts and make targets" {
     for (scripts) |it| if (std.mem.eql(u8, it.name, "build")) try testing.expectEqualStrings("vite build", it.description);
 
     try expectNames(g.get(.make_targets, web, now), &.{ "all", "build", "clean", "test" });
+
+    // After the TTL an unchanged file is not re-parsed; a changed one is.
+    const later: Io.Timestamp = .{ .nanoseconds = 5 * std.time.ns_per_s };
+    try expectNames(g.get(.make_targets, web, later), &.{ "all", "build", "clean", "test" });
+    try d.writeFile(io, .{ .sub_path = "web/Makefile", .data = "only:\n" });
+    var times: [2]std.c.timespec = .{ .{ .sec = 1, .nsec = 0 }, .{ .sec = 1, .nsec = 0 } };
+    var mk: [std.fs.max_path_bytes]u8 = undefined;
+    const mk_path = try std.fmt.bufPrintSentinel(&mk, "{s}/web/Makefile", .{root}, 0);
+    const utimensat = @extern(*const fn (c_int, [*:0]const u8, *[2]std.c.timespec, c_int) callconv(.c) c_int, .{ .name = "utimensat" });
+    _ = utimensat(std.c.AT.FDCWD, mk_path, &times, 0);
+    const much_later: Io.Timestamp = .{ .nanoseconds = 10 * std.time.ns_per_s };
+    try expectNames(g.get(.make_targets, web, much_later), &.{"only"});
     // The Makefile scan is cwd-only.
     try testing.expectEqual(@as(usize, 0), g.get(.make_targets, src, now).len);
 }

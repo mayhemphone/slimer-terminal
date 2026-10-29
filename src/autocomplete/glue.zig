@@ -1,21 +1,37 @@
 //! Glue between the core surface and the process-wide autocomplete
-//! engine: lazy engine creation, the C result layout, and history
-//! recording. Everything here runs on the surface's (main) thread.
+//! worker: lazy worker creation, async queries delivered through the
+//! surface mailbox, the C result layout, and history recording.
+//!
+//! Everything in this file is called on the surface's (main) thread; the
+//! engine itself only ever runs on the worker thread.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const global = @import("../global.zig");
+const apprt = @import("../apprt.zig");
 const unicode = @import("../unicode/main.zig");
 const ac = @import("main.zig");
-const Engine = @import("Engine.zig");
+const W = ac.Worker(SurfaceSink);
 
 const log = std.log.scoped(.autocomplete);
 
-/// The shared engine, created on first use.
-var shared: ?*Engine = null;
+/// Delivers a finished query to its surface through the app mailbox. If
+/// the mailbox is full the result is dropped; the next keystroke queries
+/// again.
+pub const SurfaceSink = struct {
+    mailbox: apprt.surface.Mailbox,
 
-/// Paths configured by the apprt before first use. Owned by
-/// `global.alloc()`.
+    pub fn deliver(self: SurfaceSink, r: *ac.OwnedResult) void {
+        if (self.mailbox.push(.{ .autocomplete_result = r }, .{ .instant = {} }) == 0) {
+            r.destroy();
+        }
+    }
+};
+
+/// The shared worker, created on first use.
+var worker: ?*W = null;
+
+/// Paths configured by the apprt before the worker exists.
 var data_dir: ?[]u8 = null;
 var histfile: ?[]u8 = null;
 
@@ -30,10 +46,10 @@ pub fn configure(dir: []const u8, zsh_history: []const u8) void {
     if (histfile) |h| alloc.free(h);
     data_dir = if (dir.len > 0) alloc.dupe(u8, dir) catch null else null;
     histfile = if (zsh_history.len > 0) alloc.dupe(u8, zsh_history) catch null else null;
-    if (shared) |e| applyPaths(e);
+    if (worker) |w| applyPaths(w);
 }
 
-fn applyPaths(e: *Engine) void {
+fn applyPaths(w: *W) void {
     const alloc = global.alloc();
     const log_path: ?[]u8 = if (data_dir) |d|
         std.fs.path.join(alloc, &.{ d, "history.log" }) catch null
@@ -42,16 +58,16 @@ fn applyPaths(e: *Engine) void {
     defer if (log_path) |p| alloc.free(p);
     const import_path: ?[]u8 = if (histfile) |h|
         alloc.dupe(u8, h) catch null
-    else if (e.home.len > 0)
-        std.fs.path.join(alloc, &.{ e.home, ".zsh_history" }) catch null
+    else if (w.engine.home.len > 0)
+        std.fs.path.join(alloc, &.{ w.engine.home, ".zsh_history" }) catch null
     else
         null;
     defer if (import_path) |p| alloc.free(p);
-    e.history.setPaths(log_path, import_path) catch {};
+    w.submitPaths(log_path, import_path);
 }
 
-pub fn engine() ?*Engine {
-    if (shared) |e| return e;
+fn getWorker() ?*W {
+    if (worker) |w| return w;
     const alloc = global.alloc();
 
     var home: []const u8 = "";
@@ -61,25 +77,25 @@ pub fn engine() ?*Engine {
         home = h;
     };
 
-    const e = alloc.create(Engine) catch return null;
-    e.* = Engine.init(alloc, global.io(), .{ .home = home }) catch {
-        alloc.destroy(e);
+    const w = W.create(alloc, global.io(), .{ .home = home }) catch |err| {
+        log.warn("autocomplete: cannot start worker err={}", .{err});
         return null;
     };
-    applyPaths(e);
-    shared = e;
-    return e;
-}
-
-fn nowUnix() i64 {
-    return std.Io.Timestamp.now(global.io(), .real).toSeconds();
+    applyPaths(w);
+    worker = w;
+    return w;
 }
 
 /// Record the command line that is about to run (OSC 133 C).
 pub fn recordCommand(line: []const u8, cwd: []const u8) void {
     if (line.len == 0) return;
-    const e = engine() orelse return;
-    e.record(line, cwd, nowUnix());
+    const w = getWorker() orelse return;
+    w.submitRecord(line, cwd);
+}
+
+/// Forget queued work for a surface that is going away.
+pub fn cancel(owner: u64) void {
+    if (worker) |w| w.cancel(owner);
 }
 
 /// Display width in cells of `bytes`, for anchoring the popup.
@@ -91,43 +107,58 @@ fn cellWidth(bytes: []const u8) u32 {
     return cols;
 }
 
-/// Run a query for a surface's stored buffer and fill `out`. Strings in
-/// `out` are owned by `state` until its next query. Returns true if
-/// there is at least one suggestion.
-pub fn query(state: *ac.State, alloc: Allocator, cwd: []const u8, out: *ac.CResult) bool {
+/// Fill `out` for a surface. If the worker has delivered a result for the
+/// current generation, copy it (strings stay owned by `state`) and return
+/// true when it has items. Otherwise queue a query for this generation
+/// (once), set `out.pending`, and return false; the surface emits another
+/// update when the result arrives.
+pub fn query(
+    state: *ac.State,
+    owner: u64,
+    mailbox: apprt.surface.Mailbox,
+    cwd: []const u8,
+    out: *ac.CResult,
+) bool {
     out.* = .{ .generation = state.generation };
     if (!state.active or state.buffer.len == 0) return false;
-    const e = engine() orelse return false;
 
-    const r = e.query(.{
-        .buffer = state.buffer,
-        .cursor = state.cursor,
-        .cwd = cwd,
-        .now = .now(global.io(), .awake),
-        .now_unix = nowUnix(),
-    }) catch |err| {
-        log.warn("autocomplete: query failed err={}", .{err});
-        return false;
+    if (state.result) |r| if (r.generation == state.generation) {
+        fill(state, r, out);
+        return out.count > 0;
     };
 
+    if (state.requested != state.generation) {
+        const w = getWorker() orelse return false;
+        w.submitQuery(.{
+            .owner = owner,
+            .generation = state.generation,
+            .buffer = state.buffer,
+            .cursor = state.cursor,
+            .cwd = cwd,
+            .sink = .{ .mailbox = mailbox },
+        });
+        state.requested = state.generation;
+    }
+    out.pending = true;
+    return false;
+}
+
+fn fill(state: *const ac.State, r: *const ac.OwnedResult, out: *ac.CResult) void {
     out.replace_start = r.replace_start;
     out.replace_len = r.replace_len;
-    out.replace_cols = cellWidth(state.buffer[r.replace_start_byte..r.replace_end_byte]);
-
-    const a = state.resetQueryArena(alloc);
+    const end = @min(r.replace_end_byte, state.buffer.len);
+    const start = @min(r.replace_start_byte, end);
+    out.replace_cols = cellWidth(state.buffer[start..end]);
     var n: usize = 0;
     for (r.items) |it| {
         if (n == out.items.len) break;
-        const text = a.dupe(u8, it.text) catch break;
-        const display = a.dupe(u8, it.display) catch break;
-        const description = a.dupe(u8, it.description) catch break;
         out.items[n] = .{
-            .text = text.ptr,
-            .text_len = text.len,
-            .display = display.ptr,
-            .display_len = display.len,
-            .description = description.ptr,
-            .description_len = description.len,
+            .text = it.text.ptr,
+            .text_len = it.text.len,
+            .display = it.display.ptr,
+            .display_len = it.display.len,
+            .description = it.description.ptr,
+            .description_len = it.description.len,
             .kind = @backingInt(it.kind),
             .dangerous = it.dangerous,
             .match_len = it.match_len,
@@ -135,5 +166,4 @@ pub fn query(state: *ac.State, alloc: Allocator, cwd: []const u8, out: *ac.CResu
         n += 1;
     }
     out.count = n;
-    return n > 0;
 }
