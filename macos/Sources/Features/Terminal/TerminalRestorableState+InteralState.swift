@@ -15,6 +15,9 @@ extension TerminalRestorableState {
         let effectiveFullscreenMode: FullscreenMode?
         let tabColor: TerminalTabColor?
         let titleOverride: String?
+
+        // slimer: custom tab accent (`#RRGGBB`); optional so older states decode.
+        let tabAccentHex: String?
     }
 }
 
@@ -26,6 +29,7 @@ extension TerminalRestorableState.InternalState where ViewType == Ghostty.Surfac
             effectiveFullscreenMode: controller.fullscreenStyle?.fullscreenMode,
             tabColor: (controller.window as? TerminalWindow)?.tabColor,
             titleOverride: controller.titleOverride,
+            tabAccentHex: (controller.window as? TerminalWindow)?.tabAccentHex, // slimer:
         )
     }
 }
