@@ -99,7 +99,8 @@ for non-repositories, excluded paths, or when the service is disabled.
 ## Security posture
 
 - **Read-only.** The app itself runs only `rev-parse`, `status`, `stash list` and
-  `for-each-ref`. Mutating commands are never executed by the app.
+  `for-each-ref` (plus `remote get-url origin` from the status bar popover, see
+  `STATUSBAR.md`). Mutating commands are never executed by the app.
 - **git lookup:** only on `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, in that
   order (Homebrew git is preferred; it starts faster than Apple's shim). The user's
   `$PATH` is never consulted. `/usr/bin/git` is accepted only when `xcode-select -p`
