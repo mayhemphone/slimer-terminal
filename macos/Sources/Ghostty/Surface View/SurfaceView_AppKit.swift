@@ -456,6 +456,7 @@ extension Ghostty {
 
             // Notify libghostty
             ghostty_surface_set_focus(surface, focused)
+            existingAutocompleteController?.surfaceFocusChanged(focused) // slimer
 
             // Update our secure input state if we are a password input
             if passwordInput {
@@ -488,6 +489,7 @@ extension Ghostty {
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
             // Store this size so we can reuse it when backing properties change
             contentSize = size
+            existingAutocompleteController?.hide() // slimer
         }
 
         private func setSurfaceSize(width: UInt32, height: UInt32) {
@@ -1076,6 +1078,7 @@ extension Ghostty {
 
         override func scrollWheel(with event: NSEvent) {
             guard let surfaceModel else { return }
+            existingAutocompleteController?.hide() // slimer
 
             var x = event.scrollingDeltaX
             var y = event.scrollingDeltaY
@@ -1122,6 +1125,8 @@ extension Ghostty {
                 self.interpretKeyEvents([event])
                 return
             }
+
+            if autocompleteController?.handleKey(event) == true { return } // slimer
 
             // On any keyDown event we unset our bell state
             bell = false
@@ -1335,6 +1340,8 @@ extension Ghostty {
             if !focused {
                 return false
             }
+
+            if autocompleteController?.handleKey(event) == true { return true } // slimer
 
             // Get information about if this is a binding.
             let bindingFlags = surfaceModel.flatMap { surface in
