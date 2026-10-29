@@ -27,7 +27,7 @@ class TerminalWindow: NSWindow {
 
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {
-        let view = NSHostingView(rootView: TabColorIndicatorView(color: effectiveTabAccentColor))
+        let view = NSHostingView(rootView: TabColorIndicatorView(color: effectiveTabAccentColor)) // slimer:
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
@@ -763,6 +763,16 @@ extension TerminalWindow {
 private struct TabColorIndicatorView: View {
     /// The accent color to display (slimer: any NSColor, see `effectiveTabAccentColor`).
     let color: NSColor?
+
+    // slimer: upstream initializer, kept for merge compatibility.
+    init(tabColor: TerminalTabColor) {
+        self.color = tabColor.displayColor
+    }
+
+    // slimer: arbitrary accent color.
+    init(color: NSColor?) {
+        self.color = color
+    }
 
     var body: some View {
         if let color {

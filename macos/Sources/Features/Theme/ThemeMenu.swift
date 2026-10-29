@@ -132,9 +132,25 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
             menu.addItem(empty)
         }
 
+        // A pin to a theme that no longer exists in themes.json.
+        if case .explicit(let id?) = assignment, store.theme(id: id) == nil {
+            let missing = NSMenuItem(title: "Missing Theme (removed from themes.json)", action: nil, keyEquivalent: "")
+            missing.state = .on
+            missing.isEnabled = false
+            menu.addItem(missing)
+        }
+
         for theme in store.themes {
-            let item = makeItem(theme.name, Choice(.useTheme(theme.id), surface: surface))
-            item.isEnabled = surface != nil
+            let resolves = controller.namedThemeResolves(theme)
+            let title = resolves ? theme.name : "\(theme.name) (Ghostty theme not found)"
+            let item = makeItem(title, Choice(.useTheme(theme.id), surface: surface))
+            // A theme whose only content is an unresolvable Ghostty theme does nothing.
+            let usable = resolves || theme.background != nil || theme.foreground != nil ||
+                theme.cursorColor != nil || theme.selectionBackground != nil || theme.accent != nil
+            item.isEnabled = surface != nil && usable
+            if !resolves, let name = theme.ghosttyTheme {
+                item.toolTip = "“\(name)” is not a plain theme name in ~/.config/ghostty/themes or the app bundle."
+            }
             if case .explicit(let id) = assignment, id == theme.id {
                 item.state = .on
             } else if assignment == .automatic, applied?.id == theme.id {
@@ -165,6 +181,15 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
         open.setImageIfDesired(systemSymbolName: "doc.text")
         menu.addItem(open)
         menu.addItem(makeItem("Reload Themes", Choice(.reloadThemes)))
+
+        if store.persistence != .writable {
+            let warning = NSMenuItem(
+                title: "themes.json can’t be safely rewritten; changes aren’t saved",
+                action: nil,
+                keyEquivalent: "")
+            warning.isEnabled = false
+            menu.addItem(warning)
+        }
     }
 
     func populateAccentMenu(_ menu: NSMenu, window: TerminalWindow) {
@@ -233,16 +258,53 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
             }
             panel.setTarget(self)
             panel.setAction(#selector(colorPanelDidChange(_:)))
+            colorPanelAttached = true
+            observeColorPanelClose(panel)
             panel.makeKeyAndOrderFront(nil)
         }
     }
 
     private weak var colorPanelWindow: TerminalWindow?
+    private var colorPanelCloseObserver: NSObjectProtocol?
+    private var colorPanelAttached = false
 
     @objc private func colorPanelDidChange(_ sender: NSColorPanel) {
-        guard let window = colorPanelWindow else { return }
-        guard let hex = sender.color.hexString, SurfaceTheme.isValidHex(hex) else { return }
+        guard let window = colorPanelWindow else {
+            detachColorPanel(sender)
+            return
+        }
+        guard let hex = sender.color.strictHexString, SurfaceTheme.isValidHex(hex) else { return }
+        // A custom accent replaces any upstream palette color, which would otherwise win.
+        window.tabColor = .none
         window.tabAccentHex = hex
+    }
+
+    /// The shared color panel outlives this use; stop routing its changes here once it
+    /// closes so a later, unrelated use of the panel can't recolor this tab.
+    private func observeColorPanelClose(_ panel: NSColorPanel) {
+        if let observer = colorPanelCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        colorPanelCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            self?.detachColorPanel(panel)
+        }
+    }
+
+    private func detachColorPanel(_ panel: NSColorPanel) {
+        if colorPanelAttached {
+            panel.setTarget(nil)
+            panel.setAction(nil)
+            colorPanelAttached = false
+        }
+        colorPanelWindow = nil
+        if let observer = colorPanelCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+            colorPanelCloseObserver = nil
+        }
     }
 
     // MARK: Helpers
