@@ -144,11 +144,33 @@ export fn ghostty_config_load_arg(self: *Config, arg: [*:0]const u8) bool {
     };
 }
 
+// slimer: the only keys ghostty_config_load_arg accepts. Per-surface themes
+// are colors only; anything that changes behavior (keybinds, clipboard,
+// commands, `theme`, `config-file`) must never come through this path.
+const load_arg_allowed_keys = std.StaticStringMap(void).initComptime(.{
+    .{"background"},
+    .{"foreground"},
+    .{"cursor-color"},
+    .{"cursor-text"},
+    .{"selection-background"},
+    .{"selection-foreground"},
+    .{"palette"},
+});
+
+comptime {
+    // Every allowed key must be a real config key.
+    for (load_arg_allowed_keys.keys()) |k| {
+        if (!@hasField(Config, k)) @compileError("unknown config key in allowlist: " ++ k);
+    }
+}
+
 // slimer: see ghostty_config_load_arg. The argument must be a single
-// `key=value` (or bare `key`) with no leading dashes and no newlines.
+// `key=value` with an allowlisted key, no leading dashes and no newlines.
 fn config_load_arg_(self: *Config, alloc: std.mem.Allocator, arg: []const u8) !bool {
     if (arg.len == 0 or arg[0] == '-') return false;
     if (std.mem.indexOfAny(u8, arg, "\r\n\x00") != null) return false;
+    const eql = std.mem.indexOfScalar(u8, arg, '=') orelse return false;
+    if (!load_arg_allowed_keys.has(arg[0..eql])) return false;
 
     const full = try std.fmt.allocPrint(alloc, "--{s}", .{arg});
     defer alloc.free(full);
@@ -322,6 +344,12 @@ test "slimer: ghostty_config_load_arg applies a color" {
     // Later args override earlier ones, like config file lines.
     try testing.expect(try config_load_arg_(&cfg, alloc, "background=#445566"));
     try testing.expectEqual(@as(u8, 0x44), cfg.background.r);
+
+    // Palette entries and the other color keys are allowed.
+    try testing.expect(try config_load_arg_(&cfg, alloc, "palette=1=#AA0000"));
+    try testing.expectEqual(@as(u8, 0xAA), cfg.palette.value[1].r);
+    try testing.expect(try config_load_arg_(&cfg, alloc, "selection-foreground=#010203"));
+    try testing.expect(try config_load_arg_(&cfg, alloc, "cursor-text=#010203"));
 }
 
 test "slimer: ghostty_config_load_arg rejects bad input" {
@@ -340,6 +368,14 @@ test "slimer: ghostty_config_load_arg rejects bad input" {
     try testing.expect(!try config_load_arg_(&cfg, alloc, ""));
     try testing.expect(!try config_load_arg_(&cfg, alloc, "--background=#112233"));
     try testing.expect(!try config_load_arg_(&cfg, alloc, "not-a-real-key=1"));
+
+    // Only color keys are allowed; behavior-changing keys are refused.
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "theme=Nord"));
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "config-file=/tmp/x"));
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "keybind=enter=text:rm"));
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "clipboard-read=allow"));
+    try testing.expect(!try config_load_arg_(&cfg, alloc, "background"));
+    try testing.expect(cfg.theme == null);
 
     // Invalid values produce a diagnostic and return false.
     try testing.expect(!try config_load_arg_(&cfg, alloc, "background=notacolor"));
