@@ -373,6 +373,12 @@ extension Ghostty.Notification {
     /// Notification sent to toggle split maximize/unmaximize.
     static let didToggleSplitZoom = Notification.Name("com.mitchellh.ghostty.didToggleSplitZoom")
 
+    /// slimer: the autocomplete buffer for a surface changed or was cleared.
+    /// The object is the SurfaceView; userInfo carries the generation (UInt64)
+    /// under AutocompleteGenerationKey.
+    static let ghosttyAutocompleteDidUpdate = Notification.Name("com.mitchellh.ghostty.autocompleteDidUpdate")
+    static let AutocompleteGenerationKey = ghosttyAutocompleteDidUpdate.rawValue + ".generation"
+
     /// Notification
     static let didReceiveInitialWindowFrame = Notification.Name("com.mitchellh.ghostty.didReceiveInitialWindowFrame")
     static let FrameKey = "com.mitchellh.ghostty.frame"
