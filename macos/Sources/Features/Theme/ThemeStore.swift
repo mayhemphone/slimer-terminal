@@ -6,7 +6,10 @@ import OSLog
 /// `$XDG_CONFIG_HOME/slimer/themes.json` (default `~/.config/slimer/themes.json`).
 ///
 /// - Writes are atomic.
-/// - Parsing is tolerant (see ``ThemeDocument``); a broken file never loses the presets.
+/// - Parsing is tolerant (see ``ThemeDocument``), but the file is only ever rewritten when
+///   doing so loses nothing (see ``Persistence``). A broken file is never overwritten with
+///   presets; a file from a newer version, or one with entries/keys we don't understand, is
+///   never rewritten at all (edits stay in memory and a warning is logged).
 /// - External edits are picked up via a `DispatchSource` on the parent directory, coalesced,
 ///   and ignored when they decode to the state we already hold (our own writes).
 ///
@@ -25,6 +28,24 @@ final class ThemeStore: ObservableObject {
 
     let fileURL: URL
 
+    /// Whether in-app edits may be written back to the file.
+    enum Persistence: Equatable {
+        /// The file is missing or round-trips losslessly.
+        case writable
+        /// The file exists but isn't valid JSON. The first in-app edit moves it aside to
+        /// `themes.json.broken-<timestamp>` and then writes.
+        case unparseable
+        /// The file can't be read (permissions, not a regular file, too large). Never written.
+        case unreadable
+        /// The file parsed, but rewriting it would drop data (unknown keys/kinds, invalid
+        /// entries, or a newer `version`). Never written.
+        case lossy
+    }
+
+    @Published private(set) var persistence: Persistence = .writable
+
+    static let maxFileBytes = 4 * 1024 * 1024
+
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
     private var reloadWorkItem: DispatchWorkItem?
@@ -35,13 +56,26 @@ final class ThemeStore: ObservableObject {
     init(fileURL: URL? = nil, watch: Bool = true) {
         self.fileURL = fileURL ?? Self.defaultFileURL(environment: ProcessInfo.processInfo.environment)
 
-        let loaded = Self.load(from: self.fileURL)
-        self.themes = loaded?.themes ?? Self.presets
-        self.rules = loaded?.rules ?? []
+        self.themes = Self.presets
+        self.rules = []
 
-        // First run: write the presets so the user has a file to edit.
-        if loaded == nil {
+        switch Self.read(fileURL: self.fileURL) {
+        case .missing:
+            // First run: write the presets so the user has a file to edit.
+            persistence = .writable
             save()
+        case .unreadable:
+            persistence = .unreadable
+            Self.logger.warning("themes.json is unreadable; using presets in memory and never writing")
+        case .data(let data):
+            if let doc = Self.decode(data) {
+                themes = doc.themes
+                rules = doc.rules
+                persistence = Self.persistence(for: doc)
+            } else {
+                persistence = .unparseable
+                Self.logger.warning("themes.json is not valid; using presets in memory until it is fixed or edited in-app")
+            }
         }
 
         if watch {
@@ -121,7 +155,37 @@ final class ThemeStore: ObservableObject {
 
     private func didChange() {
         generation &+= 1
-        save()
+        persistUserEdit()
+    }
+
+    /// Writes after an in-app edit, according to ``persistence``.
+    private func persistUserEdit() {
+        switch persistence {
+        case .writable:
+            save()
+        case .unparseable:
+            let stamp = Int(Date().timeIntervalSince1970)
+            let backup = fileURL.deletingLastPathComponent()
+                .appendingPathComponent("themes.json.broken-\(stamp)")
+            do {
+                try FileManager.default.moveItem(at: fileURL, to: backup)
+                Self.logger.warning("moved unparseable themes.json to \(backup.lastPathComponent, privacy: .public)")
+                persistence = .writable
+                save()
+            } catch {
+                Self.logger.error("could not back up unparseable themes.json; not writing: \(String(describing: error), privacy: .public)")
+            }
+        case .unreadable, .lossy:
+            Self.logger.warning("themes.json is not safely writable; change kept in memory only")
+        }
+    }
+
+    static func persistence(for doc: ThemeDocument) -> Persistence {
+        if doc.version > ThemeDocument.currentVersion || doc.droppedEntries > 0 {
+            logger.warning("themes.json has \(doc.droppedEntries) entries/keys this version can't preserve (file version \(doc.version)); it will not be rewritten")
+            return .lossy
+        }
+        return .writable
     }
 
     // MARK: Persistence
@@ -132,21 +196,51 @@ final class ThemeStore: ObservableObject {
 
     /// Re-reads the file. Does nothing if the decoded content equals the current state.
     func reload() {
-        guard let loaded = Self.load(from: fileURL) else { return }
-        guard loaded != document else { return }
-        themes = loaded.themes
-        rules = loaded.rules
-        generation &+= 1
+        switch Self.read(fileURL: fileURL) {
+        case .missing:
+            // Deleted externally: keep what we have; the next edit recreates it.
+            persistence = .writable
+        case .unreadable:
+            persistence = .unreadable
+        case .data(let data):
+            guard let loaded = Self.decode(data) else {
+                persistence = .unparseable
+                return
+            }
+            persistence = Self.persistence(for: loaded)
+            guard loaded.themes != themes || loaded.rules != rules else { return }
+            themes = loaded.themes
+            rules = loaded.rules
+            generation &+= 1
+        }
+    }
+
+    enum ReadResult {
+        case missing
+        case unreadable
+        case data(Data)
+    }
+
+    /// Reads the file without blocking on FIFOs/devices and with a size cap.
+    static func read(fileURL: URL) -> ReadResult {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir) else { return .missing }
+        guard let text = GhosttyThemeResolver.readRegularFile(fileURL, maxBytes: maxFileBytes) else {
+            return .unreadable
+        }
+        return .data(Data(text.utf8))
     }
 
     static func load(from url: URL) -> ThemeDocument? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard case .data(let data) = read(fileURL: url) else { return nil }
         return decode(data)
     }
 
     static func decode(_ data: Data) -> ThemeDocument? {
         do {
-            return try JSONDecoder().decode(ThemeDocument.self, from: data)
+            var doc = try JSONDecoder().decode(ThemeDocument.self, from: data)
+            doc.droppedEntries += ThemeDocument.unknownKeyCount(in: data)
+            return doc
         } catch {
             logger.warning("themes.json could not be parsed: \(String(describing: error), privacy: .public)")
             return nil

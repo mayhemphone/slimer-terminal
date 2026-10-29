@@ -174,13 +174,18 @@ extension ThemeRule.Match: Codable {
 // MARK: - File document
 
 /// The on-disk shape of `themes.json`. Decoding is tolerant: a malformed theme or rule is
-/// skipped rather than failing the whole file, and unknown keys are ignored.
+/// skipped rather than failing the whole file, and unknown keys are ignored. Everything
+/// skipped or altered is counted in ``droppedEntries`` so the store can refuse to rewrite a
+/// file it would damage.
 struct ThemeDocument: Codable, Equatable {
     static let currentVersion = 1
 
     var version: Int
     var themes: [SurfaceTheme]
     var rules: [ThemeRule]
+
+    /// Not encoded. Number of entries/keys that decoding dropped or changed.
+    var droppedEntries = 0
 
     init(version: Int = ThemeDocument.currentVersion, themes: [SurfaceTheme], rules: [ThemeRule]) {
         self.version = version
@@ -197,18 +202,63 @@ struct ThemeDocument: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
-        themes = try container.decodeIfPresent([Lossy<SurfaceTheme>].self, forKey: .themes)?
-            .compactMap(\.value)
-            .map { $0.sanitized() } ?? []
-        rules = try container.decodeIfPresent([Lossy<ThemeRule>].self, forKey: .rules)?
-            .compactMap(\.value) ?? []
+        var dropped = 0
+
+        let rawThemes = try container.decodeIfPresent([Lossy<SurfaceTheme>].self, forKey: .themes) ?? []
+        let decodedThemes = rawThemes.compactMap(\.value)
+        dropped += rawThemes.count - decodedThemes.count
+        themes = decodedThemes.map { $0.sanitized() }
+        dropped += zip(decodedThemes, themes).filter { $0 != $1 }.count
+
+        let rawRules = try container.decodeIfPresent([Lossy<ThemeRule>].self, forKey: .rules) ?? []
+        rules = rawRules.compactMap(\.value)
+        dropped += rawRules.count - rules.count
 
         // Deduplicate ids (first wins) and drop rules pointing at unknown themes.
         var seen = Set<UUID>()
+        let themeCount = themes.count
         themes = themes.filter { seen.insert($0.id).inserted }
+        dropped += themeCount - themes.count
         let themeIds = seen
         var seenRules = Set<UUID>()
+        let ruleCount = rules.count
         rules = rules.filter { themeIds.contains($0.themeId) && seenRules.insert($0.id).inserted }
+        dropped += ruleCount - rules.count
+
+        droppedEntries = dropped
+    }
+
+    static func == (lhs: ThemeDocument, rhs: ThemeDocument) -> Bool {
+        lhs.version == rhs.version && lhs.themes == rhs.themes && lhs.rules == rhs.rules
+    }
+
+    private static let topLevelKeys: Set<String> = ["version", "themes", "rules"]
+    private static let themeKeys: Set<String> = [
+        "id", "name", "ghosttyTheme", "background", "foreground",
+        "cursorColor", "selectionBackground", "accent",
+    ]
+    private static let ruleKeys: Set<String> = ["id", "match", "themeId", "priority"]
+    private static let matchKeys: Set<String> = ["kind", "value"]
+
+    /// Keys in `data` that this version would not write back. Non-object entries are
+    /// already counted by the decoder.
+    static func unknownKeyCount(in data: Data) -> Int {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
+        func extra(_ object: Any, _ known: Set<String>) -> Int {
+            guard let dict = object as? [String: Any] else { return 0 }
+            return dict.keys.filter { !known.contains($0) }.count
+        }
+        var count = extra(root, topLevelKeys)
+        for theme in root["themes"] as? [Any] ?? [] {
+            count += extra(theme, themeKeys)
+        }
+        for rule in root["rules"] as? [Any] ?? [] {
+            count += extra(rule, ruleKeys)
+            if let dict = rule as? [String: Any], let match = dict["match"] {
+                count += extra(match, matchKeys)
+            }
+        }
+        return count
     }
 
     func encode(to encoder: Encoder) throws {
