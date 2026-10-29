@@ -12,6 +12,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const autocomplete = @import("../autocomplete/main.zig"); // slimer
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -383,6 +384,7 @@ pub const StreamHandler = struct {
             .apc_put => self.apc.feed(self.alloc, value),
             .apc_put_slice => self.apc.feedSlice(self.alloc, value.bytes),
             .kitty_clipboard => try self.kittyClipboard(value),
+            .autocomplete_buffer => self.autocompleteBuffer(value), // slimer
 
             // Unimplemented
             .title_push,
@@ -1950,6 +1952,27 @@ pub const StreamHandler = struct {
     /// Display a GUI progress report.
     fn progressReport(self: *StreamHandler, report: terminal.osc.Command.ProgressReport) void {
         self.surfaceMessageWriter(.{ .progress_report = report });
+    }
+
+    /// slimer: forward an OSC 7704 autocomplete buffer report to the
+    /// surface, which applies the gate (shell integration seen, prompt
+    /// input state, rate limit). The parser's slices are borrowed, so
+    /// the payload is copied here and freed by the surface.
+    fn autocompleteBuffer(
+        self: *StreamHandler,
+        cmd: terminal.osc.Command.AutocompleteBuffer,
+    ) void {
+        const update = autocomplete.Update.init(
+            self.alloc,
+            cmd.buffer,
+            cmd.cursor,
+            cmd.keymap,
+            cmd.truncated,
+        ) catch |err| {
+            log.warn("autocomplete: failed to copy buffer report err={}", .{err});
+            return;
+        };
+        self.surfaceMessageWriter(.{ .autocomplete_buffer = update });
     }
 };
 

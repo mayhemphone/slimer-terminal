@@ -7,6 +7,7 @@ const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
+const autocomplete = @import("../autocomplete/main.zig"); // slimer
 const Config = @import("../config.zig").Config;
 const MessageData = @import("../datastruct/main.zig").MessageData;
 
@@ -159,6 +160,10 @@ pub const Message = union(enum) {
 
     /// Renderer pushed a new frame, redraw this surface.
     redraw,
+
+    /// slimer: the shell reported its command line (OSC 7704). The
+    /// receiver owns the payload and must call `deinit` on it.
+    autocomplete_buffer: autocomplete.Update,
 
     pub const ReportTitleStyle = enum {
         csi_21_t,

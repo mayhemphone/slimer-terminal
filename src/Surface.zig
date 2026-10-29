@@ -38,6 +38,7 @@ const internal_os = @import("os/main.zig");
 const inspectorpkg = @import("inspector/main.zig");
 const SurfaceMouse = @import("surface_mouse.zig");
 const ProcessInfo = @import("pty.zig").ProcessInfo;
+const autocompletepkg = @import("autocomplete/main.zig"); // slimer
 
 const log = std.log.scoped(.surface);
 
@@ -186,6 +187,10 @@ search: ?Search = null,
 
 /// Used to rate limit BEL handling.
 last_bell_time: ?std.Io.Timestamp = null,
+
+/// slimer: the last shell-reported command line accepted for the
+/// autocomplete popup, plus its rate limiter. See autocomplete/main.zig.
+autocomplete: autocompletepkg.State = .{},
 
 /// The effect of an input event. This can be used by callers to take
 /// the appropriate action after an input event. For example, key
@@ -874,6 +879,7 @@ pub fn deinit(self: *Surface) void {
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
     self.alloc.destroy(self.renderer_state.mutex);
     self.config.deinit();
+    self.autocomplete.deinit(self.alloc); // slimer
 
     log.info("surface closed id={x}", .{self.id});
 }
@@ -1193,6 +1199,10 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
         .start_command => {
             self.command_timer = .now(global.io(), .awake);
+
+            // slimer: the command line was submitted, so any popup
+            // built from it is stale. Clear and tell the apprt.
+            self.autocompleteClear();
         },
 
         .stop_command => |v| timer: {
@@ -1237,7 +1247,97 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .{ .selected = v },
             );
         },
+
+        .autocomplete_buffer => |update| self.autocompleteBuffer(update), // slimer
     }
+}
+
+/// slimer: handle an OSC 7704 autocomplete buffer report.
+///
+/// The gate: accept only if (1) shell integration has been seen on the
+/// active screen, (2) the terminal is in the prompt-input state, meaning
+/// after OSC 133 B and before OSC 133 C, and (3) the rate limit holds.
+/// Upstream tracks (1) as `Screen.semantic_prompt.seen`, flipped the
+/// first time any OSC 133 prompt mark is applied, and (2) as
+/// `Screen.cursor.semantic_content`, which OSC 133 B sets to `.input`
+/// and OSC 133 C / D set to `.output`. The alternate screen never
+/// qualifies. Dropped reports are logged at debug level and do nothing.
+fn autocompleteBuffer(self: *Surface, update: autocompletepkg.Update) void {
+    defer update.deinit();
+
+    const at_input: bool = at_input: {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        const t = &self.io.terminal;
+        if (t.screens.active_key != .primary) break :at_input false;
+        const screen = t.screens.active;
+        break :at_input screen.semantic_prompt.seen and
+            screen.cursor.semantic_content == .input;
+    };
+    if (!at_input) {
+        log.debug("autocomplete: dropping buffer report outside prompt input", .{});
+        return;
+    }
+
+    if (!self.autocomplete.admit(.now(global.io(), .awake))) {
+        log.debug("autocomplete: dropping buffer report, rate limited", .{});
+        return;
+    }
+
+    self.autocomplete.set(self.alloc, update) catch |err| {
+        log.warn("autocomplete: failed to store buffer err={}", .{err});
+        return;
+    };
+
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .autocomplete_update,
+        .{ .generation = self.autocomplete.generation },
+    ) catch |err| {
+        log.warn("apprt failed to report autocomplete update err={}", .{err});
+    };
+}
+
+/// slimer: forget the autocomplete buffer and notify the apprt if there
+/// was one. Called when the command line is submitted.
+fn autocompleteClear(self: *Surface) void {
+    if (!self.autocomplete.active) return;
+    self.autocomplete.clear(self.alloc);
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .autocomplete_update,
+        .{ .generation = self.autocomplete.generation },
+    ) catch |err| {
+        log.warn("apprt failed to report autocomplete update err={}", .{err});
+    };
+}
+
+/// slimer: send accepted completion text to the shell. The text is
+/// validated (see `autocompletepkg.isSafeAcceptText`) and rejected, not
+/// stripped, if unsafe. On success `CSI 7705 ~`, the percent-encoded
+/// text, and BEL are written to the pty through the same queue keyboard
+/// input uses, so readonly mode and the IO thread ordering apply. The
+/// shell widget bound to that sequence replaces the current token; this
+/// never sends a newline or runs anything.
+pub fn autocompleteAccept(self: *Surface, text: []const u8) !void {
+    if (!autocompletepkg.isSafeAcceptText(text)) {
+        log.warn("autocomplete: rejecting unsafe accept text len={d}", .{text.len});
+        return error.InvalidAutocompleteText;
+    }
+
+    var buf: [autocompletepkg.acceptSequenceCapacity(autocompletepkg.max_accept_bytes)]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try autocompletepkg.writeAcceptSequence(&writer, text);
+    self.queueIo(try termio.Message.writeReq(
+        self.alloc,
+        writer.buffered(),
+    ), .unlocked);
+}
+
+/// slimer: the app dismissed the popup. Clears the stored buffer and
+/// bumps the generation; no action is emitted since the app asked.
+pub fn autocompleteDismiss(self: *Surface) void {
+    self.autocomplete.clear(self.alloc);
 }
 
 fn selectionScrollTick(self: *Surface) !void {
