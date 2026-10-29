@@ -77,6 +77,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuCommandPalette: NSMenuItem?
 
     @IBOutlet private var menuEqualizeSplits: NSMenuItem?
+    @IBOutlet private var menuArrangeEqualizeAll: NSMenuItem? // slimer: Window > Arrange Panes > Equalize All
     @IBOutlet private var menuMoveSplitDividerUp: NSMenuItem?
     @IBOutlet private var menuMoveSplitDividerDown: NSMenuItem?
     @IBOutlet private var menuMoveSplitDividerLeft: NSMenuItem?
@@ -1274,6 +1275,7 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "resize_split:right,10", menuItem: self.menuMoveSplitDividerRight)
         syncMenuShortcut(config, action: "resize_split:left,10", menuItem: self.menuMoveSplitDividerLeft)
         syncMenuShortcut(config, action: "equalize_splits", menuItem: self.menuEqualizeSplits)
+        syncMenuShortcut(config, action: "equalize_splits", menuItem: self.menuArrangeEqualizeAll) // slimer
         syncMenuShortcut(config, action: "reset_window_size", menuItem: self.menuReturnToDefaultSize)
 
         syncMenuShortcut(config, action: "increase_font_size:1", menuItem: self.menuIncreaseFontSize)
