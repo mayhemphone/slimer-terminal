@@ -12,7 +12,8 @@ import Foundation
 ///   read (an editor saving at the same moment), the write is abandoned.
 /// - A read-only file (or directory) is refused rather than replaced.
 /// - Each write that newly adds Slimer's block first keeps a timestamped copy next to the
-///   file (`<name>.slimer-backup-YYYYMMDD-HHMMSS`); the newest three are kept.
+///   file (`<name>.slimer-backup-YYYYMMDD-HHMMSS`); the oldest (the config before Slimer
+///   first edited it) and the newest two are kept.
 /// - Only regular, UTF-8 files up to 1 MiB are read or written.
 struct GhosttyConfigFile {
     static let maxBytes = 1024 * 1024
@@ -269,9 +270,16 @@ struct GhosttyConfigFile {
                 throw FileError.writeFailed("could not create \(backup.lastPathComponent): \(error.localizedDescription)")
             }
         }
-        let all = backups()
-        for old in all.dropLast(Self.backupsKept) {
+        for old in Self.backupsToPrune(backups()) {
             try? fm.removeItem(at: old)
         }
+    }
+
+    /// Which of `backups` (oldest first) to delete: all but the oldest and the newest
+    /// ``backupsKept`` − 1. The oldest is the config as it was before Slimer first touched
+    /// it, so no amount of later backups can rotate it out.
+    static func backupsToPrune(_ backups: [URL]) -> [URL] {
+        guard backups.count > backupsKept else { return [] }
+        return Array(backups.dropFirst().dropLast(backupsKept - 1))
     }
 }

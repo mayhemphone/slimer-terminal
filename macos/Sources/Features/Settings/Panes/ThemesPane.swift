@@ -6,41 +6,47 @@ struct ThemesPane: View {
     @ObservedObject private var store = ThemeStore.shared
     @State private var selectedThemeId: UUID?
 
+    // No outer ScrollView: a List inside a ScrollView is a scroll view in a scroll view,
+    // and on macOS the outer one takes the wheel events, so the inner list never scrolls.
+    // Instead the two lists share the pane's height and each scrolls on its own (with a
+    // visible scroller); the editor scrolls separately when the pane is short.
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                persistenceBanner
+        VStack(alignment: .leading, spacing: 12) {
+            persistenceBanner
 
-                GroupBox("Themes") {
-                    HStack(alignment: .top, spacing: 12) {
-                        themeList
-                        Divider()
-                        if let id = selectedThemeId, let theme = store.theme(id: id) {
+            GroupBox("Themes") {
+                HStack(alignment: .top, spacing: 12) {
+                    themeList
+                    Divider()
+                    if let id = selectedThemeId, let theme = store.theme(id: id) {
+                        ScrollView {
                             ThemeEditor(theme: theme, editable: store.acceptsEdits) { updated in
                                 store.upsert(updated)
                             }
                             .id(theme.id)
-                        } else {
-                            Text("Select a theme to edit it.")
-                                .foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
+                        .scrollIndicators(.visible)
+                    } else {
+                        Text("Select a theme to edit it.")
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .frame(minHeight: 280)
                 }
-
-                GroupBox("Rules") {
-                    ThemeRulesEditor(store: store)
-                }
-
-                HStack {
-                    Button("Open themes.json") { NSWorkspace.shared.open(store.fileURL) }
-                    Button("Reload") { store.reload() }
-                    Spacer()
-                }
+                .frame(minHeight: 220, maxHeight: .infinity)
             }
-            .padding(20)
+            .layoutPriority(1)
+
+            GroupBox("Rules") {
+                ThemeRulesEditor(store: store)
+            }
+
+            HStack {
+                Button("Open themes.json") { NSWorkspace.shared.open(store.fileURL) }
+                Button("Reload") { store.reload() }
+                Spacer()
+            }
         }
+        .padding(16)
     }
 
     @ViewBuilder
@@ -68,7 +74,9 @@ struct ThemesPane: View {
                 }
                 .tag(theme.id)
             }
+            .scrollIndicators(.visible)
             .frame(width: 200)
+            .frame(maxHeight: .infinity)
             HStack {
                 Button {
                     let theme = SurfaceTheme(name: "New Theme", background: "#1E1E1E", foreground: "#DDDDDD")
@@ -209,7 +217,8 @@ struct ThemeRulesEditor: View {
                     store.moveRules(fromOffsets: source, toOffset: destination)
                 }
             }
-            .frame(minHeight: 160)
+            .scrollIndicators(.visible)
+            .frame(minHeight: 110, maxHeight: .infinity)
 
             HStack {
                 Button("Add Rule") {

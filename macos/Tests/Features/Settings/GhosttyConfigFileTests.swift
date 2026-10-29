@@ -53,7 +53,7 @@ struct GhosttyConfigFileTests {
         #expect(leftovers.isEmpty)
     }
 
-    @Test func timestampedBackupsKeepNewestThree() throws {
+    @Test func timestampedBackupsKeepTheOldestAndNewestTwo() throws {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("config")
@@ -67,8 +67,16 @@ struct GhosttyConfigFileTests {
         let backups = file.backups()
         #expect(backups.count == 3)
         #expect(backups.allSatisfy { $0.lastPathComponent.hasPrefix("config.slimer-backup-") })
-        #expect(try backups.map { try String(contentsOf: $0, encoding: .utf8) } == ["v2\n", "v3\n", "v4\n"])
+        // v0 is the config before Slimer's first write: it is never rotated out.
+        #expect(try backups.map { try String(contentsOf: $0, encoding: .utf8) } == ["v0\n", "v3\n", "v4\n"])
         #expect(file.backupURL(at: base).lastPathComponent.count == "config.slimer-backup-YYYYMMDD-HHMMSS".count)
+    }
+
+    @Test func pruningPolicy() {
+        let urls = (0..<6).map { URL(fileURLWithPath: "/tmp/config.slimer-backup-\($0)") }
+        #expect(GhosttyConfigFile.backupsToPrune(Array(urls.prefix(3))).isEmpty)
+        #expect(GhosttyConfigFile.backupsToPrune(Array(urls.prefix(4))) == [urls[1]])
+        #expect(GhosttyConfigFile.backupsToPrune(urls) == Array(urls[1...3]))
     }
 
     @Test func writesThroughSymlink() throws {

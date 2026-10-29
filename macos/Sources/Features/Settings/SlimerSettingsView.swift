@@ -56,7 +56,7 @@ struct SlimerSettingsView: View {
                 .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .navigationTitle((selection ?? .general).title)
         }
-        .frame(minWidth: 760, minHeight: 520)
+        .frame(minWidth: 760, minHeight: 580)
     }
 
     @ViewBuilder

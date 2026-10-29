@@ -100,6 +100,7 @@ struct LocationsEditor: View {
                         store.edit { $0.moveVisibleLocations(fromOffsets: source, toOffset: destination) }
                     }
                 }
+                .scrollIndicators(.visible)
                 .frame(width: 220)
                 HStack {
                     Button {
@@ -251,6 +252,7 @@ struct CommandsEditor: View {
                         store.edit { $0.moveVisibleCommands(fromOffsets: source, toOffset: destination) }
                     }
                 }
+                .scrollIndicators(.visible)
                 .frame(width: 220)
                 HStack {
                     Button {
@@ -366,6 +368,7 @@ struct RecentEditor: View {
                     }
                 }
             }
+            .scrollIndicators(.visible)
             HStack {
                 Spacer()
                 // Recent directories are per machine (recent.json), so clearing works even

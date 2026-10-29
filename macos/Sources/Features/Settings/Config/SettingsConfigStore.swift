@@ -8,9 +8,12 @@ import OSLog
 ///
 /// - Reading and parsing happen on a background queue (``ConfigScan``); published state is
 ///   only changed on the main thread.
-/// - Edits are validated, collected, and written 300 ms after the last change (so a slider
-///   doesn't rewrite the file on every tick), also off the main thread. Pending edits are
-///   flushed when the window closes and when the app quits.
+/// - Edits are validated, collected, and written 400 ms after the last change (so a slider,
+///   or arrowing through the theme list, doesn't rewrite the file and reload on every tick),
+///   also off the main thread. Pending edits are flushed when the window closes and when
+///   the app quits.
+/// - A write that adds Slimer's block backs the file up first, at most once per file for the
+///   life of the store, so repeated edits can't churn through the kept backups.
 /// - Each write re-reads the file, rewrites only Settings' own lines in the block, refuses
 ///   to recreate a file that disappeared (an editor mid-save), writes atomically and aborts
 ///   if the file changed underneath (retrying once), then reloads the config. When the
@@ -23,7 +26,7 @@ final class SettingsConfigStore: ObservableObject {
 
     nonisolated static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.slimer", category: "settings")
 
-    static let writeDebounce: TimeInterval = 0.3
+    static let writeDebounce: TimeInterval = 0.4
 
     /// Keys whose effective value can't be read back through the C API.
     static let unverifiableKeys: Set<String> = ["theme", "font-family", "keybind"]
@@ -65,6 +68,8 @@ final class SettingsConfigStore: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     /// Whether the file existed when it was last read; if it did, a write never recreates it.
     private var fileExisted = false
+    /// Files (resolved paths) this store has already backed up.
+    private var backedUpPaths = Set<String>()
     private var rawFindings: [Finding] = []
     private var loadGeneration = 0
     private let ioQueue = DispatchQueue(label: "top.mayhem.slimer.settings-io", qos: .userInitiated)
@@ -80,6 +85,12 @@ final class SettingsConfigStore: ObservableObject {
     /// Injected for tests; defaults to the app's reload.
     var reloadConfig: () -> Void = {
         (NSApp.delegate as? AppDelegate)?.ghostty.reloadConfig()
+    }
+
+    /// Runs the debounced write after the delay on the main queue. Injected for tests,
+    /// which run the work item themselves instead of waiting.
+    var scheduleDebounced: (TimeInterval, DispatchWorkItem) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// The config Ghostty is using right now.
@@ -306,7 +317,7 @@ final class SettingsConfigStore: ObservableObject {
             MainActor.assumeIsolated { self?.flushInBackground() }
         }
         pendingWrite = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.writeDebounce, execute: work)
+        scheduleDebounced(Self.writeDebounce, work)
     }
 
     /// The managed entries in registry order, ready for the writer.
@@ -343,10 +354,14 @@ final class SettingsConfigStore: ObservableObject {
         var file: GhosttyConfigFile
         var entries: [GhosttyConfigWriter.Entry]
         var fileExisted: Bool
+        /// False once this store has backed up this file: one backup per file per session.
+        var mayBackUp = true
     }
 
     struct WriteOutcome: Equatable {
         var wrote = false
+        /// The file that was backed up before this write, if one was.
+        var backedUpPath: String?
         var error: String?
     }
 
@@ -357,7 +372,8 @@ final class SettingsConfigStore: ObservableObject {
         hasPendingWrite = false
         guard let file else { return nil }
         awaitingVerification = managed
-        return WriteJob(file: file, entries: entries(), fileExisted: fileExisted)
+        return WriteJob(file: file, entries: entries(), fileExisted: fileExisted,
+                        mayBackUp: !backedUpPaths.contains(file.targetURL.path))
     }
 
     /// Re-reads, renders and writes. Retries once if the file changes between the read and
@@ -373,8 +389,12 @@ final class SettingsConfigStore: ObservableObject {
                 let rendered = try GhosttyConfigWriter.render(lines: lines, entries: job.entries, owns: SettingsKeySpec.owns)
                 guard rendered != snapshot.text else { return WriteOutcome() }
                 let addsBlock = try GhosttyConfigWriter.blockRange(in: lines.contents) == nil
-                try job.file.write(rendered, expected: snapshot.stamp, backup: addsBlock)
-                return WriteOutcome(wrote: true)
+                let backup = addsBlock && job.mayBackUp
+                try job.file.write(rendered, expected: snapshot.stamp, backup: backup)
+                return WriteOutcome(
+                    wrote: true,
+                    backedUpPath: backup && snapshot.stamp != nil ? job.file.targetURL.path : nil
+                )
             } catch GhosttyConfigFile.FileError.changedOnDisk(_) where attempt == 0 {
                 continue
             } catch {
@@ -392,6 +412,9 @@ final class SettingsConfigStore: ObservableObject {
             return
         }
         fileError = nil
+        if let path = outcome.backedUpPath {
+            backedUpPaths.insert(path)
+        }
         if outcome.wrote {
             lastWrite = Date()
             reloadConfig()

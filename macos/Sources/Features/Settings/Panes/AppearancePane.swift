@@ -41,6 +41,10 @@ struct AppearancePane: View {
 
 /// Lists Ghostty theme names from the user's and the app's themes directories (the same
 /// places `ghostty +list-themes` and the theme resolver look), with a search field.
+///
+/// Clicking a name, or moving with the arrow keys once the list has focus, sets `theme`
+/// right away in Settings; the store debounces the config write (and so the reload) until
+/// you pause.
 struct ThemeNamePicker: View {
     @ObservedObject var store: SettingsConfigStore
     @State private var names: [String] = []
@@ -63,22 +67,20 @@ struct ThemeNamePicker: View {
             if loading {
                 ProgressView().controlSize(.small)
             } else {
-                List(filtered, id: \.self) { name in
-                    Button {
-                        store.set("theme", name)
-                    } label: {
-                        HStack {
-                            Text(name)
-                            Spacer()
-                            if store.displayValue(for: "theme") == name {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                // An AppKit table in its own NSScrollView, not a SwiftUI List: a List nested
+                // in a grouped Form (itself a scroll view) gets no wheel events and no
+                // scroller on macOS 13/14.
+                ThemeNameTable(
+                    names: filtered,
+                    selected: store.displayValue(for: "theme"),
+                    enabled: !store.isOverridden("theme")
+                ) { name in
+                    store.set("theme", name)
                 }
-                .frame(height: 180)
+                .frame(height: 220)
+                Text("Click a theme, then use ↑ and ↓ to try others. Saved when you pause.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             ConfigKeyStatus(store: store, key: "theme")
         }
@@ -96,25 +98,130 @@ struct ThemeNamePicker: View {
         return names.filter { $0.localizedCaseInsensitiveContains(q) }
     }
 
-    /// Regular files with safe names, deduplicated, sorted case-insensitively.
+    /// Regular files with plain names, deduplicated, sorted case-insensitively. The same
+    /// list the per-terminal Theme Browser shows.
     nonisolated static func themeNames(in directories: [URL]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for dir in directories {
-            let entries = (try? FileManager.default.contentsOfDirectory(
-                at: dir,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-            for url in entries {
-                let name = url.lastPathComponent
-                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
-                      case .success = SettingsValidator.validateThemeValue(name),
-                      seen.insert(name).inserted else { continue }
-                result.append(name)
+        GhosttyThemeResolver.themeNames(in: directories)
+    }
+}
+
+/// A single-column `NSTableView` in a bordered `NSScrollView` with an always-visible
+/// scroller. Arrow keys move the selection natively; every selection change made by the
+/// user calls `onSelect`. Selection changes coming from `selected` don't.
+struct ThemeNameTable: NSViewRepresentable {
+    let names: [String]
+    let selected: String?
+    var enabled = true
+    let onSelect: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let table = NSTableView()
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        column.resizingMask = .autoresizingMask
+        table.addTableColumn(column)
+        table.headerView = nil
+        table.style = .plain
+        table.rowHeight = 20
+        table.allowsEmptySelection = true
+        table.dataSource = context.coordinator
+        table.delegate = context.coordinator
+
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        // Always show the scroller; overlay scrollers stay hidden until you scroll.
+        scroll.scrollerStyle = .legacy
+        scroll.borderType = .bezelBorder
+        context.coordinator.table = table
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.onSelect = onSelect
+        coordinator.table?.isEnabled = enabled
+        if coordinator.names != names {
+            coordinator.reload(names: names, selected: selected)
+        } else if coordinator.selected != selected {
+            // Scroll only when the value changed elsewhere, not for the user's own moves.
+            coordinator.syncSelection(selected, scroll: !coordinator.userSelected(selected))
+        }
+    }
+
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        weak var table: NSTableView?
+        var names: [String] = []
+        var selected: String?
+        var onSelect: (String) -> Void = { _ in }
+        private var syncing = false
+        private var lastUserSelection: String?
+
+        private static let cellIdentifier = NSUserInterfaceItemIdentifier("ThemeNameCell")
+
+        func userSelected(_ name: String?) -> Bool {
+            name != nil && name == lastUserSelection
+        }
+
+        /// New rows (the search changed). reloadData can trim the old selection and notify;
+        /// that must never be taken as the user picking a theme.
+        func reload(names newNames: [String], selected name: String?) {
+            names = newNames
+            syncing = true
+            table?.reloadData()
+            syncing = false
+            syncSelection(name, scroll: true)
+        }
+
+        func syncSelection(_ name: String?, scroll: Bool) {
+            selected = name
+            guard let table else { return }
+            syncing = true
+            defer { syncing = false }
+            if let name, let row = names.firstIndex(of: name) {
+                table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                if scroll { table.scrollRowToVisible(row) }
+            } else {
+                table.deselectAll(nil)
             }
         }
-        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+
+        func numberOfRows(in tableView: NSTableView) -> Int { names.count }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard names.indices.contains(row) else { return nil }
+            let cell: NSTableCellView
+            if let reused = tableView.makeView(withIdentifier: Self.cellIdentifier, owner: self) as? NSTableCellView {
+                cell = reused
+            } else {
+                cell = NSTableCellView()
+                cell.identifier = Self.cellIdentifier
+                let label = NSTextField(labelWithString: "")
+                label.lineBreakMode = .byTruncatingTail
+                label.translatesAutoresizingMaskIntoConstraints = false
+                cell.addSubview(label)
+                cell.textField = label
+                NSLayoutConstraint.activate([
+                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                ])
+            }
+            cell.textField?.stringValue = names[row]
+            return cell
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !syncing, let table else { return }
+            let row = table.selectedRow
+            guard names.indices.contains(row) else { return }
+            let name = names[row]
+            lastUserSelection = name
+            selected = name
+            onSelect(name)
+        }
     }
 }
 
