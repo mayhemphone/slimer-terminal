@@ -35,18 +35,34 @@ enum ClaudeLauncher {
     // MARK: Detection
 
     private static var cachedBinary: URL?
+    private static var lastMiss: Date?
 
-    /// The located `claude` binary. A positive result is cached for the life of
-    /// the app; a negative one is re-checked on each call (a handful of `stat`s),
-    /// so installing Claude Code while Slimer runs is picked up.
-    static var binary: URL? {
-        if let cachedBinary { return cachedBinary }
+    /// How long a failed lookup is remembered, so menus can ask cheaply.
+    static let missCacheLifetime: TimeInterval = 30
+
+    /// The located `claude` binary (cached; see `resolveBinary(validate:)`).
+    static var binary: URL? { resolveBinary(validate: false) }
+
+    /// Whether Claude Code was found. Cheap: served from the cache. Menus ask
+    /// this when they are built; launching re-validates.
+    static var isInstalled: Bool { binary != nil }
+
+    /// Look up the binary. A hit is cached until a launch finds it gone
+    /// (`validate: true` re-checks the cached file); a miss is cached for
+    /// `missCacheLifetime`, so installing Claude Code while Slimer runs is
+    /// picked up without a `stat` on every menu render.
+    static func resolveBinary(validate: Bool) -> URL? {
+        if let cached = cachedBinary {
+            if !validate || locate(candidates: [cached.path]) != nil { return cached }
+            cachedBinary = nil
+        } else if !validate, let lastMiss, Date().timeIntervalSince(lastMiss) < missCacheLifetime {
+            return nil
+        }
         let found = locate(candidates: defaultCandidates())
         cachedBinary = found
+        lastMiss = found == nil ? Date() : nil
         return found
     }
-
-    static var isInstalled: Bool { binary != nil }
 
     /// Install locations in priority order, followed by the absolute entries of
     /// `pathEnvironment` (the app's environment, not a login shell's).
@@ -93,8 +109,13 @@ enum ClaudeLauncher {
     /// Open Claude Code next to `surfaceView`, in its working directory.
     /// Without Claude installed this opens the install page instead.
     static func launch(_ mode: Mode, placement: Placement, from surfaceView: Ghostty.SurfaceView) {
-        guard let binary, let command = commandLine(binary: binary, mode: mode) else {
+        guard let binary = resolveBinary(validate: true) else {
             openInstallPage()
+            return
+        }
+        guard let command = commandLine(binary: binary, mode: mode) else {
+            // A path with `'`, `\` or control characters cannot be typed safely.
+            NSSound.beep()
             return
         }
 

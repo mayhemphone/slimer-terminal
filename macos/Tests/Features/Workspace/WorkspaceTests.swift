@@ -234,15 +234,10 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertTrue(WorkspaceShell.isSafeToInsert(evil))
     }
 
-    func testTextBindingActionClearLinePrefixesCtrlU() {
-        XCTAssertEqual(
-            WorkspaceShell.textBindingAction("cd '/a'", clearLine: true, pressEnter: true),
-            "text:\\x15cd '/a'\\r"
-        )
-        XCTAssertEqual(
-            WorkspaceShell.textBindingAction("git status", clearLine: true, pressEnter: false),
-            "text:\\x15git status"
-        )
+    func testTextBindingActionNeverClearsTheLine() {
+        // No Ctrl-U (or any other line-kill key) is ever sent.
+        XCTAssertEqual(WorkspaceShell.textBindingAction("cd '/a'", pressEnter: true), "text:cd '/a'\\r")
+        XCTAssertFalse(WorkspaceShell.textBindingAction("git status", pressEnter: false).contains("x15"))
     }
 
     func testIsSafeToInsertRejectsFormatCharacters() {

@@ -1899,6 +1899,17 @@ pub const CAPI = struct {
         return surface.core_surface.child_exited;
     }
 
+    // slimer: safe-to-press-Enter gate for UI-inserted commands.
+    /// Returns true only if the shell is idle at an empty primary prompt
+    /// (see src/slimer/prompt.zig). Requires OSC 133 shell integration.
+    export fn ghostty_surface_slimer_idle_prompt(surface: *Surface) bool {
+        const core = &surface.core_surface;
+        if (core.child_exited or core.readonly) return false;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        return @import("../slimer/prompt.zig").idlePromptEmpty(core.renderer_state.terminal);
+    }
+
     /// Returns true if the surface has a selection.
     export fn ghostty_surface_has_selection(surface: *Surface) bool {
         return surface.core_surface.hasSelection();

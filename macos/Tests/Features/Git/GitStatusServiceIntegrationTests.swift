@@ -259,7 +259,8 @@ struct GitStatusServiceIntegrationTests {
         let branches = await service.branchList(root: repo.root)
         #expect(branches.contains("main"))
         #expect(branches.contains("feature/x"))
-        #expect(branches.contains("it's-quoted"))
+        // `'` cannot be quoted safely for every shell (fish), so it is dropped.
+        #expect(!branches.contains("it's-quoted"))
         #expect(Set(branches).count == branches.count)
     }
 }
