@@ -101,7 +101,8 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             .source_dir = b.path("src/shell-integration"),
             .install_dir = .{ .custom = "share" },
             .install_subdir = b.pathJoin(&.{ "ghostty", "shell-integration" }),
-            .exclude_extensions = &.{".md"},
+            // slimer: also keep the PowerShell predictor sources and Pester tests out of the bundle
+            .exclude_extensions = &.{ ".md", ".cs", ".csproj", ".ps1" },
         });
         try steps.append(b.allocator, &install_step.step);
     }
