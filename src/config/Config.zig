@@ -2844,7 +2844,8 @@ keybind: Keybinds = .{},
 /// Only implemented on macOS.
 @"quick-terminal-animation-duration": f64 = 0.2,
 
-/// slimer: The style of the quick terminal enter and exit animation.
+// slimer: Slimer-specific key.
+/// The style of the quick terminal enter and exit animation.
 ///
 /// Valid values are:
 ///
@@ -2863,7 +2864,8 @@ keybind: Keybinds = .{},
 /// Only implemented on macOS.
 @"quick-terminal-animation": QuickTerminalAnimation = .slide,
 
-/// slimer: The easing curve of the quick terminal enter and exit animation.
+// slimer: Slimer-specific key.
+/// The easing curve of the quick terminal enter and exit animation.
 ///
 /// Valid values are:
 ///
@@ -2882,7 +2884,8 @@ keybind: Keybinds = .{},
 /// Only implemented on macOS.
 @"quick-terminal-animation-easing": QuickTerminalAnimationEasing = .@"ease-in",
 
-/// slimer: Controls when the tab bar is shown in the quick terminal. The
+// slimer: Slimer-specific key.
+/// Controls when the tab bar is shown in the quick terminal. The
 /// quick terminal supports tabs via the usual `new_tab`, `close_tab`,
 /// `previous_tab`, `next_tab`, `goto_tab` and `move_tab` actions.
 ///
@@ -9928,14 +9931,16 @@ pub const QuickTerminalSpaceBehavior = enum {
     move,
 };
 
-/// slimer: See quick-terminal-animation
+// slimer: Slimer-specific type.
+/// See quick-terminal-animation
 pub const QuickTerminalAnimation = enum {
     slide,
     fade,
     none,
 };
 
-/// slimer: See quick-terminal-animation-easing
+// slimer: Slimer-specific type.
+/// See quick-terminal-animation-easing
 pub const QuickTerminalAnimationEasing = enum {
     @"ease-in",
     @"ease-out",
@@ -9943,7 +9948,8 @@ pub const QuickTerminalAnimationEasing = enum {
     linear,
 };
 
-/// slimer: See quick-terminal-tab-bar
+// slimer: Slimer-specific type.
+/// See quick-terminal-tab-bar
 pub const QuickTerminalTabBar = enum {
     auto,
     always,
