@@ -91,7 +91,7 @@ shell-type indicator. The Slimer core does not parse it yet. Ghostty
 ignores OSCs it does not know, so sending it is harmless. Keys are
 lowercase letters; values keep only `[A-Za-z0-9._+-]` and at most 64
 characters. Known keys: `shell` (`pwsh`, `bash`, `zsh`, `cmd`, …),
-`version`, `edition`, `os`, `distro` (WSL). It is untrusted data: the host
+`version`, `edition`, `os`, `distro` (WSL), `msystem` (Git Bash). It is untrusted data: the host
 may show it, never act on it. Not to be confused with `CSI 7706 ~` (the
 line-accept sequence in the in-progress autocomplete work).
 
