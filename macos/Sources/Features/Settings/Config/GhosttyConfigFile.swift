@@ -12,7 +12,8 @@ import Foundation
 ///   read (an editor saving at the same moment), the write is abandoned.
 /// - A read-only file (or directory) is refused rather than replaced.
 /// - Each write that newly adds Slimer's block first keeps a timestamped copy next to the
-///   file (`<name>.slimer-backup-YYYYMMDD-HHMMSS`); the newest three are kept.
+///   file (`<name>.slimer-backup-YYYYMMDD-HHMMSS`); the oldest (the config before Slimer
+///   first edited it) and the newest two are kept.
 /// - Only regular, UTF-8 files up to 1 MiB are read or written.
 struct GhosttyConfigFile {
     static let maxBytes = 1024 * 1024
@@ -239,24 +240,50 @@ struct GhosttyConfigFile {
 
     // MARK: Backups
 
-    /// `<name>.slimer-backup-YYYYMMDD-HHMMSS` next to the target.
+    /// `<name>.slimer-backup-YYYYMMDD-HHMMSS` next to the target, in UTC so the names sort
+    /// in time order across time zone moves and DST changes.
     func backupURL(at date: Date) -> URL {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
         let target = targetURL
         return target.deletingLastPathComponent()
-            .appendingPathComponent(target.lastPathComponent + Self.backupPrefix + formatter.string(from: date))
+            .appendingPathComponent(target.lastPathComponent + Self.backupPrefix + Self.backupStamp(date))
     }
 
-    /// Existing backups, oldest first.
+    static func backupStamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: date)
+    }
+
+    /// True if `name` is exactly `<config name>.slimer-backup-` + `\d{8}-\d{6}`. Anything
+    /// else with the prefix (say, the user's own `config.slimer-backup-keep`) is not ours
+    /// and is never pruned.
+    static func isBackupName(_ name: String, for configName: String) -> Bool {
+        let prefix = configName + backupPrefix
+        guard name.hasPrefix(prefix) else { return false }
+        let stamp = Array(name.utf8.dropFirst(prefix.utf8.count))
+        guard stamp.count == 15 else { return false }
+        for (index, byte) in stamp.enumerated() {
+            if index == 8 {
+                guard byte == UInt8(ascii: "-") else { return false }
+            } else {
+                guard (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) else { return false }
+            }
+        }
+        return true
+    }
+
+    /// Slimer's backups, oldest timestamp first. Names written before backups used UTC are
+    /// in local time; they still sort by their timestamp, and pruning also keeps the
+    /// earliest-created one, so a time zone change can't cost the original.
     func backups() -> [URL] {
         let target = targetURL
         let dir = target.deletingLastPathComponent()
-        let prefix = target.lastPathComponent + Self.backupPrefix
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        return names.filter { $0.hasPrefix(prefix) }.sorted().map { dir.appendingPathComponent($0) }
+        return names.filter { Self.isBackupName($0, for: target.lastPathComponent) }
+            .sorted()
+            .map { dir.appendingPathComponent($0) }
     }
 
     private func makeBackup(of target: URL, now: Date) throws {
@@ -269,9 +296,27 @@ struct GhosttyConfigFile {
                 throw FileError.writeFailed("could not create \(backup.lastPathComponent): \(error.localizedDescription)")
             }
         }
-        let all = backups()
-        for old in all.dropLast(Self.backupsKept) {
+        let existing = backups().map { url in
+            (url: url, created: try? url.resourceValues(forKeys: [.creationDateKey]).creationDate)
+        }
+        for old in Self.backupsToPrune(existing) {
             try? fm.removeItem(at: old)
         }
+    }
+
+    /// Which of `backups` (sorted by the timestamp in their names, oldest first) to delete:
+    /// everything except the oldest by name, the earliest created on disk, and the newest
+    /// ``backupsKept`` − 1. The oldest is the config as it was before Slimer first touched
+    /// it, so no amount of later backups can rotate it out; checking the creation date too
+    /// covers names whose time zone differs (local-time names from older builds).
+    static func backupsToPrune(_ backups: [(url: URL, created: Date?)]) -> [URL] {
+        guard backups.count > backupsKept else { return [] }
+        var keep = Set(backups.suffix(backupsKept - 1).map(\.url))
+        if let first = backups.first { keep.insert(first.url) }
+        let dated = backups.compactMap { backup in backup.created.map { (url: backup.url, created: $0) } }
+        if let earliest = dated.min(by: { $0.created < $1.created }) {
+            keep.insert(earliest.url)
+        }
+        return backups.map(\.url).filter { !keep.contains($0) }
     }
 }

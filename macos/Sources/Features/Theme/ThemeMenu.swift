@@ -3,24 +3,66 @@ import GhosttyKit
 
 /// Menu entry points for themes:
 ///
-/// - `Terminal ▸ Terminal Theme ▸ …` in the main menu (acts on the key window's focused
+/// - `View ▸ Terminal Theme ▸ …` in the main menu (acts on the key window's focused
 ///   surface), installed by ``install(into:app:)``;
+/// - the same `Terminal Theme ▸` submenu in the terminal's right-click menu (acts on the
+///   surface that was clicked), appended by ``appendSurfaceContextItems(to:surface:)``;
 /// - a `Theme ▸` submenu and a `Tab Accent ▸` submenu in the native tab context menu,
 ///   appended by ``appendTabContextItems(to:window:)``.
 ///
-/// Both menus are rebuilt each time they open, so they always reflect the store.
+/// Every theme submenu starts with "Browse Themes…" (``ThemeBrowser``). The menus are
+/// rebuilt each time they open, so they always reflect the store.
 enum ThemeMenu {
     static let mainMenuItemIdentifier = NSUserInterfaceItemIdentifier("com.slimer.terminalThemeMenuItem")
+    static let surfaceContextItemIdentifier = NSUserInterfaceItemIdentifier("com.slimer.surfaceContextThemeItem")
     static let contextThemeItemIdentifier = NSUserInterfaceItemIdentifier("com.slimer.tabContextThemeItem")
     static let contextAccentItemIdentifier = NSUserInterfaceItemIdentifier("com.slimer.tabContextAccentItem")
+
+    /// "Browse Themes…" is ⌃⌘T. No default Ghostty keybind uses ctrl+super+t (checked with
+    /// `ghostty +list-keybinds --default`), and macOS doesn't reserve it. A user keybind on
+    /// that trigger still wins: the surface handles bound keys before the menu sees them.
+    static let browseKeyEquivalent = "t"
+    static let browseKeyModifiers: NSEvent.ModifierFlags = [.command, .control]
+
+    /// Actions that live in upstream's View menu. The menu is found by these rather than by
+    /// its (localizable) title.
+    static let viewMenuActions: Set<String> = [
+        "increaseFontSize:", "decreaseFontSize:", "resetFontSize:",
+        "toggleCommandPalette:", "toggleTerminalInspector:",
+    ]
 
     /// Installs the main-menu item and starts the ``ThemeController``.
     static func install(into mainMenu: NSMenu?, app: Ghostty.App) {
         ThemeController.shared.start(app: app)
+        guard let mainMenu else {
+            ThemeStore.logger.error("theme menu: no main menu; View ▸ Terminal Theme not installed")
+            return
+        }
+        if !installMenuItem(into: mainMenu) {
+            ThemeStore.logger.error("theme menu: View menu not found; View ▸ Terminal Theme not installed")
+        }
+    }
 
-        guard let mainMenu else { return }
-        guard let terminalMenu = mainMenu.item(withTitle: "Terminal")?.submenu else { return }
-        guard terminalMenu.items.first(where: { $0.identifier == mainMenuItemIdentifier }) == nil else { return }
+    /// The main menu's View menu: the top-level submenu holding upstream's font size or
+    /// inspector items, else the one titled "View".
+    static func viewMenu(in mainMenu: NSMenu) -> NSMenu? {
+        let submenus = mainMenu.items.compactMap(\.submenu)
+        if let byAction = submenus.first(where: { menu in
+            menu.items.contains { item in
+                item.action.map { viewMenuActions.contains(NSStringFromSelector($0)) } ?? false
+            }
+        }) {
+            return byAction
+        }
+        return mainMenu.item(withTitle: "View")?.submenu
+    }
+
+    /// Adds `Terminal Theme ▸` to the View menu. Idempotent. Returns false if there is no
+    /// View menu.
+    @discardableResult
+    static func installMenuItem(into mainMenu: NSMenu) -> Bool {
+        guard let viewMenu = viewMenu(in: mainMenu) else { return false }
+        guard viewMenu.items.first(where: { $0.identifier == mainMenuItemIdentifier }) == nil else { return true }
 
         let item = NSMenuItem(title: "Terminal Theme", action: nil, keyEquivalent: "")
         item.identifier = mainMenuItemIdentifier
@@ -30,8 +72,39 @@ enum ThemeMenu {
         submenu.autoenablesItems = false
         item.submenu = submenu
 
-        terminalMenu.addItem(.separator())
-        terminalMenu.addItem(item)
+        viewMenu.addItem(.separator())
+        viewMenu.addItem(item)
+        return true
+    }
+
+    /// Appends `Terminal Theme ▸` for `surface` to its right-click menu.
+    static func appendSurfaceContextItems(to menu: NSMenu, surface: Ghostty.SurfaceView) {
+        let item = NSMenuItem(title: "Terminal Theme", action: nil, keyEquivalent: "")
+        item.identifier = surfaceContextItemIdentifier
+        item.setImageIfDesired(systemSymbolName: "paintpalette")
+        let submenu = NSMenu(title: "Terminal Theme")
+        submenu.autoenablesItems = false
+        ThemeMenuBuilder.shared.populateThemeMenu(submenu, surface: surface)
+        item.submenu = submenu
+        menu.addItem(.separator())
+        menu.addItem(item)
+    }
+
+    /// Physical key used when the layout doesn't type Latin letters (kVK_ANSI_T).
+    static let browseKeyCode: UInt16 = 0x11
+
+    /// True if `event` is the "Browse Themes…" shortcut: ⌃⌘ plus the key that types `t`,
+    /// or, on a layout whose key doesn't type an ASCII letter (Cyrillic, Greek, …), the
+    /// physical T key. Matching the physical key only then keeps ⌃⌘Y on Dvorak free.
+    static func isBrowseShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
+        let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard mods == browseKeyModifiers else { return false }
+        let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if chars == browseKeyEquivalent { return true }
+        let typesASCIILetter = chars.unicodeScalars.count == 1
+            && chars.unicodeScalars.allSatisfy { $0.isASCII && CharacterSet.letters.contains($0) }
+        return !typesASCIILetter && event.keyCode == browseKeyCode
     }
 
     /// Appends the theme and accent submenus for the tab owned by `window`. Removes any
@@ -71,6 +144,7 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
     /// What a menu item does when selected. Stored as `representedObject`.
     private final class Choice: NSObject {
         enum Kind {
+            case browse
             case useTheme(UUID?)
             case automatic
             case folderRule(UUID)
@@ -101,20 +175,58 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
     // MARK: NSMenuDelegate (main menu)
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        populateThemeMenu(menu, surface: keySurface)
+        populateThemeMenu(menu, surface: keySurface, followsKeySurface: true)
+    }
+
+    /// Answers the Browse shortcut without rebuilding the menu on every key equivalent
+    /// AppKit checks.
+    func menuHasKeyEquivalent(
+        _ menu: NSMenu,
+        for event: NSEvent,
+        target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+        action: UnsafeMutablePointer<Selector?>
+    ) -> Bool {
+        guard ThemeMenu.isBrowseShortcut(event) else { return false }
+        target.pointee = self
+        action.pointee = #selector(browseKeySurface(_:))
+        return true
+    }
+
+    @objc private func browseKeySurface(_ sender: Any?) {
+        // Pressed again while the browser has focus: close it (reverting), like Esc.
+        if ThemeBrowser.shared.isOpen {
+            ThemeBrowser.shared.close()
+            return
+        }
+        guard let surface = keySurface else {
+            NSSound.beep()
+            return
+        }
+        ThemeBrowser.shared.show(for: surface)
     }
 
     // MARK: Building
 
-    func populateThemeMenu(_ menu: NSMenu, surface: Ghostty.SurfaceView?) {
+    /// - Parameter followsKeySurface: the main menu's copy. Its Browse item keeps no surface
+    ///   and acts on whatever surface is focused when it fires, because AppKit can match its
+    ///   key equivalent long after the menu was built.
+    func populateThemeMenu(_ menu: NSMenu, surface: Ghostty.SurfaceView?, followsKeySurface: Bool = false) {
         menu.removeAllItems()
         let store = controller.store
         let assignment = surface.map { controller.assignment(for: $0.id) } ?? .automatic
         let applied = surface.flatMap { controller.appliedTheme(for: $0) }
 
+        let browse = makeItem("Browse Themes…", Choice(.browse, surface: followsKeySurface ? nil : surface))
+        browse.keyEquivalent = ThemeMenu.browseKeyEquivalent
+        browse.keyEquivalentModifierMask = ThemeMenu.browseKeyModifiers
+        browse.isEnabled = surface != nil
+        browse.setImageIfDesired(systemSymbolName: "magnifyingglass")
+        menu.addItem(browse)
+        menu.addItem(.separator())
+
         // Explicit "none".
         let none = makeItem("None (use config)", Choice(.useTheme(nil), surface: surface))
-        none.state = assignment == .explicit(nil) ? .on : .off
+        none.state = assignment == .explicit(.none) ? .on : .off
         none.isEnabled = surface != nil
         menu.addItem(none)
 
@@ -133,11 +245,19 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
         }
 
         // A pin to a theme that no longer exists in themes.json.
-        if case .explicit(let id?) = assignment, store.theme(id: id) == nil {
+        if case .explicit(.theme(let id)) = assignment, store.theme(id: id) == nil {
             let missing = NSMenuItem(title: "Missing Theme (removed from themes.json)", action: nil, keyEquivalent: "")
             missing.state = .on
             missing.isEnabled = false
             menu.addItem(missing)
+        }
+
+        // A pinned Ghostty theme (chosen in the Theme Browser).
+        if case .explicit(.ghostty(let name)) = assignment {
+            let pinned = NSMenuItem(title: "Ghostty Theme: \(name)", action: nil, keyEquivalent: "")
+            pinned.state = .on
+            pinned.isEnabled = false
+            menu.addItem(pinned)
         }
 
         for theme in store.themes {
@@ -151,7 +271,7 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
             if !resolves, let name = theme.ghosttyTheme {
                 item.toolTip = "“\(name)” is not a plain theme name in ~/.config/ghostty/themes or the app bundle."
             }
-            if case .explicit(let id) = assignment, id == theme.id {
+            if case .explicit(.theme(let id)) = assignment, id == theme.id {
                 item.state = .on
             } else if assignment == .automatic, applied?.id == theme.id {
                 // Chosen by a rule: show it as mixed so it reads as "active but not pinned".
@@ -223,6 +343,13 @@ final class ThemeMenuBuilder: NSObject, NSMenuDelegate {
     @objc private func performChoice(_ sender: NSMenuItem) {
         guard let choice = sender.representedObject as? Choice else { return }
         switch choice.kind {
+        case .browse:
+            guard let surface = choice.surface ?? keySurface else {
+                NSSound.beep()
+                return
+            }
+            ThemeBrowser.shared.show(for: surface)
+
         case .useTheme(let id):
             guard let surface = choice.surface else { return }
             controller.setExplicitTheme(id, for: surface)

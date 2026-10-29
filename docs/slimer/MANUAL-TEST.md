@@ -47,6 +47,14 @@ The first global hotkey use asks for Accessibility permission. Grant it in Syste
 
 ## Themes
 
+- [ ] View ▸ Terminal Theme exists (at the bottom of the View menu) and acts on the focused terminal.
+- [ ] Split one window into several terminals. Right-click one ▸ Terminal Theme ▸ pick a preset: only the clicked terminal changes, even when another split has focus.
+- [ ] Right-click ▸ Terminal Theme ▸ Browse Themes…: a popover opens at the top of that terminal with the search field focused. ↑/↓ recolor only that terminal as you go; holding ↓ scrolls smoothly through the Ghostty themes and the terminal keeps up with the latest row.
+- [ ] In the browser, type `nord`: the list filters and the first match previews. Enter keeps it; the popover closes and the right-click submenu shows "Ghostty Theme: Nord" checked.
+- [ ] Browse again, arrow to something else, press Esc: the terminal goes back to exactly what it had. Same when clicking outside the popover.
+- [ ] Double-clicking a row keeps it. "Automatic (follow rules)" from the browser removes the pin.
+- [ ] ⌃⌘T opens the browser for the focused terminal. The list scrolls with the wheel/trackpad and shows a scrollbar.
+- [ ] Quit and relaunch with window restoration on: a terminal pinned to a Ghostty theme keeps it.
 - [ ] Tab context menu, Theme: picking a preset recolors only that terminal.
 - [ ] "Always use for this folder…" then `cd` into that folder in another tab applies the theme there.
 - [ ] Reloading the config (Cmd+Shift+,) keeps per-terminal themes.
@@ -65,6 +73,10 @@ The first global hotkey use asks for Accessibility permission. Grant it in Syste
 
 - [ ] Cmd+, opens Settings. Back up your Ghostty config first.
 - [ ] Changing drawer position, theme or font size takes effect immediately and adds a `# >>> slimer managed` block at the end of your config file. Nothing else in the file changes.
+- [ ] Appearance ▸ Theme: the list scrolls with the mouse wheel and trackpad and shows a scrollbar. Click a theme, then hold ↓: the selection moves, and the terminals recolor about half a second after you let go (not on every row).
+- [ ] After arrowing through many themes, the config folder has one `config.slimer-backup-*` from this session, and the oldest backup still holds your original config.
+- [ ] Typing in the theme search box never changes the theme.
+- [ ] Themes & Tabs: the themes list and the rules list each scroll with the wheel when they are longer than their area (add a few rules to check), with visible scroll indicators.
 - [ ] Recording a global hotkey that is a common shortcut (Cmd+C) is refused.
 - [ ] Advanced shows the managed block, any config errors, and the backup file.
 

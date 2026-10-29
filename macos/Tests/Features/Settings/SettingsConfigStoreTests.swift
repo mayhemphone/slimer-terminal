@@ -78,6 +78,82 @@ struct SettingsConfigStoreTests {
         #expect(store.file?.backups().count == 1)
     }
 
+    private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while !condition() && clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    @Test func arrowingThroughThemesWritesOnceAfterAPause() async throws {
+        let original = "font-size = 14\n"
+        let fx = try makeStore(original)
+        defer { fx.cleanup() }
+        let store = fx.store
+        // Capture the debounce instead of waiting on the clock, so a loaded test machine
+        // can't fire a timer early or late.
+        var scheduled: [(delay: TimeInterval, work: DispatchWorkItem)] = []
+        store.scheduleDebounced = { scheduled.append(($0, $1)) }
+
+        // Arrowing through the list: each move applies at once in Settings and restarts
+        // the debounce.
+        for name in ["Nord", "Dracula", "Solarized Dark", "Tomorrow"] {
+            store.set("theme", name)
+            #expect(store.displayValue(for: "theme") == name)
+        }
+        #expect(scheduled.count == 4)
+        #expect(scheduled.allSatisfy { $0.delay >= 0.4 })
+        #expect(scheduled.dropLast().allSatisfy { $0.work.isCancelled })
+        #expect(try fx.text() == original)
+        #expect(fx.reloads() == 0)
+        #expect(store.hasPendingWrite)
+
+        // Only the last timer is live; it writes once, with the last value.
+        for item in scheduled where !item.work.isCancelled { item.work.perform() }
+        try await waitUntil { fx.reloads() > 0 }
+        #expect(fx.reloads() == 1)
+        let text = try fx.text()
+        #expect(text.contains("theme = Tomorrow"))
+        #expect(!text.contains("Nord") && !text.contains("Dracula"))
+        #expect(store.file?.backups().count == 1)
+    }
+
+    @Test func repeatedBlockChurnNeverLosesTheOriginalBackup() throws {
+        let original = "font-size = 14\n# my own config\n"
+        let fx = try makeStore(original)
+        defer { fx.cleanup() }
+
+        // Clearing and re-adding the block would back up the file each time; one store
+        // (one Settings session) backs up a file at most once.
+        for n in 0..<6 {
+            fx.store.set("theme", "Theme\(n)")
+            fx.store.flush()
+            fx.store.set("theme", nil)
+            fx.store.flush()
+        }
+        var backups = try #require(fx.store.file?.backups())
+        #expect(backups.count == 1)
+        #expect(try String(contentsOf: backups[0], encoding: .utf8) == original)
+
+        // Later sessions add backups of their own, but the original stays the oldest.
+        for n in 0..<4 {
+            let store = SettingsConfigStore(terminationNotification: Self.quitting)
+            store.reloadConfig = {}
+            store.currentConfig = { nil }
+            store.environment = fx.store.environment
+            store.appSupportDirectory = fx.store.appSupportDirectory
+            store.load(url: fx.url, synchronously: true)
+            store.set("theme", "Later\(n)")
+            store.flush()
+            store.set("theme", nil)
+            store.flush()
+        }
+        backups = try #require(fx.store.file?.backups())
+        #expect(backups.count <= GhosttyConfigFile.backupsKept)
+        #expect(try String(contentsOf: backups[0], encoding: .utf8) == original)
+    }
+
     @Test func clearingLastKeyRemovesBlock() throws {
         let fx = try makeStore("a = 1\n")
         defer { fx.cleanup() }

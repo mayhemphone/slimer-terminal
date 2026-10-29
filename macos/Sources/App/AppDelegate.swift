@@ -233,7 +233,7 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        // slimer: per-surface themes (Terminal ▸ Terminal Theme) and rule engine
+        // slimer: per-surface themes (View ▸ Terminal Theme) and rule engine
         ThemeMenu.install(into: NSApp.mainMenu, app: ghostty)
 
         // Start our update checker.

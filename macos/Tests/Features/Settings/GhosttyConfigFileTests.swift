@@ -53,7 +53,7 @@ struct GhosttyConfigFileTests {
         #expect(leftovers.isEmpty)
     }
 
-    @Test func timestampedBackupsKeepNewestThree() throws {
+    @Test func timestampedBackupsKeepTheOldestAndNewestTwo() throws {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("config")
@@ -67,8 +67,58 @@ struct GhosttyConfigFileTests {
         let backups = file.backups()
         #expect(backups.count == 3)
         #expect(backups.allSatisfy { $0.lastPathComponent.hasPrefix("config.slimer-backup-") })
-        #expect(try backups.map { try String(contentsOf: $0, encoding: .utf8) } == ["v2\n", "v3\n", "v4\n"])
+        // v0 is the config before Slimer's first write: it is never rotated out.
+        #expect(try backups.map { try String(contentsOf: $0, encoding: .utf8) } == ["v0\n", "v3\n", "v4\n"])
         #expect(file.backupURL(at: base).lastPathComponent.count == "config.slimer-backup-YYYYMMDD-HHMMSS".count)
+    }
+
+    @Test func pruningPolicy() {
+        let urls = (0..<6).map { URL(fileURLWithPath: "/tmp/config.slimer-backup-2026010\($0)-000000") }
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let inOrder = urls.enumerated().map { (url: $0.element, created: Optional(base.addingTimeInterval(Double($0.offset)))) }
+        #expect(GhosttyConfigFile.backupsToPrune(Array(inOrder.prefix(3))).isEmpty)
+        #expect(GhosttyConfigFile.backupsToPrune(Array(inOrder.prefix(4))) == [urls[1]])
+        #expect(GhosttyConfigFile.backupsToPrune(inOrder) == Array(urls[1...3]))
+
+        // After a time zone move the original (created first) can carry a later name; it is
+        // still kept, along with the oldest name and the newest two.
+        var moved = inOrder
+        moved[2].created = base.addingTimeInterval(-3600)
+        #expect(GhosttyConfigFile.backupsToPrune(moved) == [urls[1], urls[3]])
+
+        // Unknown creation dates never cause extra pruning.
+        let undated = urls.map { (url: $0, created: Date?.none) }
+        #expect(GhosttyConfigFile.backupsToPrune(undated) == Array(urls[1...3]))
+    }
+
+    @Test func backupNamesAreUTCAndOnlyExactNamesArePruned() throws {
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config")
+        try "v0\n".write(to: url, atomically: false, encoding: .utf8)
+        let file = GhosttyConfigFile(url: url)
+        #expect(file.backupURL(at: Date(timeIntervalSince1970: 0)).lastPathComponent
+                == "config.slimer-backup-19700101-000000")
+
+        // The user's own files that merely share the prefix are never touched.
+        let foreign = ["config.slimer-backup-keep", "config.slimer-backup-20260101-000000.txt",
+                       "config.slimer-backup-2026010-0000000", "other.slimer-backup-20200101-000000"]
+        for name in foreign {
+            try "mine\n".write(to: dir.appendingPathComponent(name), atomically: false, encoding: .utf8)
+        }
+        #expect(file.backups().isEmpty)
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        for n in 1...6 {
+            try file.write("v\(n)\n", expected: nil, checkUnchanged: false, backup: true,
+                           now: base.addingTimeInterval(Double(n)))
+        }
+        #expect(file.backups().count == 3)
+        for name in foreign {
+            #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path))
+        }
+        #expect(GhosttyConfigFile.isBackupName("config.slimer-backup-20260101-123456", for: "config"))
+        #expect(!GhosttyConfigFile.isBackupName("config.slimer-backup-2026010a-123456", for: "config"))
+        #expect(!GhosttyConfigFile.isBackupName("config.slimer-backup-20260101_123456", for: "config"))
     }
 
     @Test func writesThroughSymlink() throws {

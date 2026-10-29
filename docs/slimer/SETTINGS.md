@@ -23,6 +23,20 @@ Theme names come from the same directories the per-terminal theme resolver uses 
 `ghostty +list-themes` lists): `$XDG_CONFIG_HOME/ghostty/themes` (default
 `~/.config/ghostty/themes`), then the app bundle's `Contents/Resources/ghostty/themes`.
 
+**Appearance ▸ Theme list.** Click a theme, then ↑ / ↓ move through the list: each move
+sets `theme` immediately in Settings, and the config write (and Ghostty's reload, which is
+what recolors the terminals) happens once you pause for 400 ms. The list is an AppKit
+`NSTableView` in its own bordered `NSScrollView` with an always-visible scroller, not a
+SwiftUI `List`: a `List` nested in a grouped `Form` (which is itself a scroll view) got no
+wheel or trackpad events and showed no scroller. Typing in the search box never changes
+the theme; only a click or an arrow key in the list does.
+
+**Themes & Tabs** has no outer `ScrollView` any more (a `List` inside a `ScrollView` is the
+same nesting problem): the themes list and the rules list share the pane's height and each
+scrolls on its own with visible scroll indicators, and the theme editor scrolls separately
+when the window is short. The Settings window's minimum height is 580 pt so both lists keep
+a usable height. The Locations & Commands lists also show their scroll indicators.
+
 ## Writing the Ghostty config
 
 ### Which file
@@ -132,7 +146,8 @@ Values are validated before anything is scheduled (`SettingsValidator`):
 
 ### The write
 
-Edits are debounced by 300 ms (sliders don't rewrite the file on every tick). Pending edits
+Edits are debounced by 400 ms (sliders, or arrowing through the theme list, don't rewrite
+the file and reload on every tick). Pending edits
 are also flushed when the window closes and when the app quits (the store observes
 `NSApplication.willTerminateNotification`). Reading, parsing and writing run on a serial
 background queue; published state changes only on the main thread. Each write:
@@ -144,7 +159,16 @@ background queue; published state changes only on the main thread. Each write:
    regular UTF-8 file up to 1 MiB (files are opened non-blocking, so a FIFO can't hang the
    app). Symlinks are resolved, so a dotfiles symlink stays a symlink.
 3. If the write newly adds the block, first copies the file to
-   `<name>.slimer-backup-YYYYMMDD-HHMMSS` next to it; the newest three backups are kept.
+   `<name>.slimer-backup-YYYYMMDD-HHMMSS` next to it. At most one backup is made per file
+   per app run (removing and re-adding the block, e.g. with "Use value from my config",
+   doesn't make more). Three backups are kept: **the oldest**, which is your config from
+   before Slimer first edited it and is never rotated out, plus the newest two.
+   - Backup names use **UTC**, so they sort in time order after a time zone move or a DST
+     change. Older builds wrote local-time names; to keep those safe, the backup created
+     earliest on disk is also never pruned (so there can briefly be four).
+   - Only names that are exactly `<name>.slimer-backup-` + `YYYYMMDD-HHMMSS` count as
+     Slimer's backups. Anything else with that prefix (say `config.slimer-backup-keep`) is
+     yours and is never deleted.
 4. Writes a temp file in the same directory with the original mode, copies the original's
    extended attributes and ACL onto it (best effort), `F_FULLFSYNC`s it, re-checks that the
    target's device, inode, size and mtime still match the read (if not, nothing is written;
@@ -207,13 +231,17 @@ Application Support config.
 - `GlobalKeybindPlannerTests`: unbinding the user's old trigger, disable, round trip, reused
   triggers, bindings after the block.
 - `GhosttyConfigFileTests`: create, permissions and xattrs kept, timestamped backups (keep
-  three), symlink write-through, dangling symlink, read-only refusal, change detected
+  the oldest, the earliest created and the newest two; UTC names; look-alike names never
+  pruned), symlink write-through, dangling symlink, read-only refusal, change detected
   between read and rename, directory/FIFO/non-UTF-8 refusal, BOM on disk, end to end.
 - `SettingsConfigStoreTests`: validation, write + reload, one backup per added block, block
   removal, foreign block lines through edits, malformed block never written, hand edits
   during the debounce, vanished file never recreated, override warning, hotkey
   replacement, denied hotkey, stale unbind dropped on load, later default file and include
-  overrides and left-active bindings, flush on quit, asynchronous load.
+  overrides and left-active bindings, flush on quit, asynchronous load, arrowing through
+  themes writes once after the debounce (the debounce scheduler is injected, so no
+  timing), repeated block removal/re-adding across sessions never loses the original
+  backup.
 - `SettingsStoreEditTests`: `ThemeStore.update/moveRules`, lossy files reject edits,
   `WorkspaceStore.edit`.
 
