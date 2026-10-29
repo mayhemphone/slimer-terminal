@@ -1,0 +1,238 @@
+import AppKit
+import GhosttyKit
+import SwiftUI
+
+extension View {
+    /// Attach the Slimer status bar to a terminal surface view, honoring
+    /// `slimer-status-bar`. The bar takes layout space (the terminal grid
+    /// shrinks by its height once) and never overlays terminal cells.
+    func slimerStatusBar(_ surfaceView: Ghostty.SurfaceView) -> some View {
+        modifier(SlimerStatusBarModifier(surfaceView: surfaceView))
+    }
+}
+
+struct SlimerStatusBarModifier: ViewModifier {
+    let surfaceView: Ghostty.SurfaceView
+
+    @EnvironmentObject private var ghostty: Ghostty.App
+
+    func body(content: Content) -> some View {
+        let position = ghostty.config.slimerStatusBar
+        let background = ghostty.config.backgroundColor
+        VStack(spacing: 0) {
+            if position == .top {
+                SlimerStatusBar(surfaceView: surfaceView, background: background)
+            }
+            content
+            if position == .bottom {
+                SlimerStatusBar(surfaceView: surfaceView, background: background)
+            }
+        }
+    }
+}
+
+/// The ~22pt bar: cwd, user@host, git, last command on the left; Claude on the right.
+struct SlimerStatusBar: View {
+    static let height: CGFloat = 22
+
+    @ObservedObject private var model: SlimerStatusBarModel
+    private let background: Color
+
+    @State private var showGitPopover = false
+
+    init(surfaceView: Ghostty.SurfaceView, background: Color) {
+        self.model = SlimerStatusBarModel.model(for: surfaceView)
+        self.background = background
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let pwd = model.pwd {
+                cwdChip(pwd)
+            }
+            if let userHost = model.userHost {
+                StatusChip(systemImage: "person.crop.circle", text: userHost)
+                    .help("Shell host (from the terminal title)")
+            }
+            if let git = model.git {
+                gitChip(git)
+            }
+            if let last = model.lastCommand {
+                LastCommandChip(event: last)
+            }
+            Spacer(minLength: 4)
+            if model.isClaudeForeground {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.orange)
+                    .help("Claude Code is running in this terminal")
+                    .accessibilityLabel("Claude Code running")
+            }
+            ClaudeButton(model: model)
+        }
+        .font(.system(size: 11))
+        .lineLimit(1)
+        .padding(.horizontal, 6)
+        .frame(height: Self.height)
+        .frame(maxWidth: .infinity)
+        .background(background.overlay(Color.primary.opacity(0.06)))
+        .environment(\.colorScheme, NSColor(background).isLightColor ? .light : .dark)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Terminal status bar")
+    }
+
+    // MARK: Chips
+
+    private func cwdChip(_ pwd: String) -> some View {
+        Menu {
+            Button("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(pwd, forType: .string)
+            }
+            Button("Open in Finder") {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: pwd, isDirectory: &isDirectory),
+                      isDirectory.boolValue else { return }
+                NSWorkspace.shared.open(URL(fileURLWithPath: pwd, isDirectory: true))
+            }
+            Button("Open in New Tab") {
+                guard let surfaceView = model.surfaceView else { return }
+                SlimerStatusBarActions.openNewTab(from: surfaceView, workingDirectory: pwd)
+            }
+        } label: {
+            StatusChip(systemImage: "folder", text: StatusBarFormatting.abbreviate(path: pwd))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(pwd)
+    }
+
+    private func gitChip(_ git: GitRepoState) -> some View {
+        Button {
+            showGitPopover.toggle()
+        } label: {
+            GitChipLabel(state: git)
+        }
+        .buttonStyle(.plain)
+        .help("Git: \(git.headLabel)")
+        .popover(isPresented: $showGitPopover, arrowEdge: .bottom) {
+            if let surfaceView = model.surfaceView {
+                GitPopoverView(state: git, surfaceView: surfaceView) {
+                    showGitPopover = false
+                }
+            }
+        }
+    }
+}
+
+/// A small icon + text chip.
+struct StatusChip: View {
+    let systemImage: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: systemImage)
+                .font(.system(size: 9))
+            Text(text)
+                .truncationMode(.head)
+        }
+        .foregroundColor(.secondary)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+struct GitChipLabel: View {
+    let state: GitRepoState
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: state.isDetached ? "smallcircle.filled.circle" : "arrow.triangle.branch")
+                .font(.system(size: 9))
+            Text(state.headLabel)
+                .truncationMode(.middle)
+                .frame(maxWidth: 180, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
+            if state.staged > 0 { Text("+\(state.staged)").foregroundColor(.green) }
+            if state.unstaged > 0 { Text("~\(state.unstaged)").foregroundColor(.yellow) }
+            if state.untracked > 0 { Text("?\(state.untracked)") }
+            if state.conflicted > 0 { Text("!\(state.conflicted)").foregroundColor(.red) }
+            if state.ahead > 0 { Text("⇡\(state.ahead)") }
+            if state.behind > 0 { Text("⇣\(state.behind)") }
+            if state.stashCount > 0 {
+                HStack(spacing: 1) {
+                    Image(systemName: "tray.full").font(.system(size: 9))
+                    Text("\(state.stashCount)")
+                }
+            }
+            if let operation = state.operation {
+                Text(StatusBarFormatting.operationBadge(operation))
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.orange)
+            }
+        }
+        .foregroundColor(.secondary)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+struct LastCommandChip: View {
+    let event: SlimerCommandFinished.Event
+
+    var body: some View {
+        let duration = StatusBarFormatting.duration(nanoseconds: event.durationNanoseconds)
+        HStack(spacing: 3) {
+            switch event.succeeded {
+            case .some(true):
+                Text("✓").foregroundColor(.green)
+            case .some(false):
+                Text("✗ \(event.exitCode ?? 0)").foregroundColor(.red)
+            case .none:
+                Text("•")
+            }
+            Text(duration)
+        }
+        .foregroundColor(.secondary)
+        .padding(.horizontal, 4)
+        .help(helpText(duration: duration))
+    }
+
+    private func helpText(duration: String) -> String {
+        guard let code = event.exitCode else { return "Last command took \(duration)" }
+        return "Last command exited \(code) after \(duration)"
+    }
+}
+
+/// Actions shared by the bar, the popover and the Claude menu.
+@MainActor
+enum SlimerStatusBarActions {
+    /// Open a new tab next to `surfaceView` (normal window or drawer) in `workingDirectory`.
+    static func openNewTab(from surfaceView: Ghostty.SurfaceView, workingDirectory: String) {
+        var config = inheritedConfig(from: surfaceView, context: GHOSTTY_SURFACE_CONTEXT_TAB)
+        config.workingDirectory = workingDirectory
+        NotificationCenter.default.post(
+            name: Ghostty.Notification.ghosttyNewTab,
+            object: surfaceView,
+            userInfo: [Ghostty.Notification.NewSurfaceConfigKey: config]
+        )
+    }
+
+    /// The config a keybind-created tab or split of `surfaceView` would get
+    /// (font size, working directory, environment).
+    static func inheritedConfig(
+        from surfaceView: Ghostty.SurfaceView,
+        context: ghostty_surface_context_e
+    ) -> Ghostty.SurfaceConfiguration {
+        guard let surface = surfaceView.surface else { return Ghostty.SurfaceConfiguration() }
+        return Ghostty.SurfaceConfiguration(from: ghostty_surface_inherited_config(surface, context))
+    }
+
+    /// Open an https github.com URL in the browser. Anything else is ignored.
+    static func openGitHub(_ url: URL?) {
+        guard let url, url.scheme == "https", url.host == "github.com" else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
