@@ -107,6 +107,10 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
+    // slimer: workspace locations, saved commands and recent directories (workspace.json)
+    let workspaceStore = WorkspaceStore()
+    private lazy var workspaceMenu = WorkspaceMenuController(store: workspaceStore)
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -328,6 +332,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        workspaceMenu.install() // slimer: top-level "Workspace" menu
 
         // Setup signal handlers
         setupSignals()

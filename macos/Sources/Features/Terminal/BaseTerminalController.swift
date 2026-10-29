@@ -939,6 +939,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     func pwdDidChange(to: URL?) {
+        WorkspaceStore.shared.recordVisit(to, window: window) // slimer: learn recent dirs (key window only, debounced)
         guard let window else { return }
 
         if derivedConfig.macosTitlebarProxyIcon == .visible {
