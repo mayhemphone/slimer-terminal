@@ -2437,6 +2437,27 @@ keybind: Keybinds = .{},
 /// Available since 1.0.0
 @"resize-overlay-duration": Duration = .{ .duration = 750 * std.time.ns_per_ms },
 
+// slimer: per-surface status bar (cwd, repository state, last command, Claude).
+/// Where to show the status bar attached to each terminal surface (each
+/// split pane). The status bar shows the working directory, the shell
+/// host, the repository state of the working directory, the exit status
+/// and duration of the last command, and a button to launch Claude Code.
+///
+/// The bar takes layout space; it never covers terminal cells.
+///
+/// Valid values are:
+///
+///   * `bottom` - Show the bar below the terminal. This is the default.
+///
+///   * `top` - Show the bar above the terminal.
+///
+///   * `hidden` - Do not show the bar.
+///
+/// This can be changed at runtime.
+///
+/// Only implemented on macOS.
+@"slimer-status-bar": SlimerStatusBar = .bottom,
+
 /// If true, when there are multiple split panes, the mouse selects the pane
 /// that is focused. This only applies to the currently focused window; e.g.
 /// mousing over a split in an unfocused window will not focus that split
@@ -9592,6 +9613,14 @@ pub const ResizeOverlay = enum {
     always,
     never,
     @"after-first",
+};
+
+// slimer: per-surface status bar position.
+/// See slimer-status-bar
+pub const SlimerStatusBar = enum {
+    bottom,
+    top,
+    hidden,
 };
 
 /// See resize-overlay-position
