@@ -20,7 +20,7 @@ enum AutocompleteKind: UInt8 {
         case .option: return "-"
         case .arg: return "•"
         case .path: return "/"
-        case .history: return "↺"
+        case .history: return "◷"
         case .generator: return "⎇"
         }
     }
@@ -117,10 +117,12 @@ enum AutocompleteText {
 }
 
 enum AutocompleteSelection {
-    /// The row selected when the popup opens: the first non-dangerous item.
-    /// Dangerous items are never pre-selected; if all are dangerous, none is.
-    static func initial(_ items: [AutocompleteItem]) -> Int? {
-        items.firstIndex { !$0.dangerous }
+    /// The item Tab (or Right at the end of the line) inserts when nothing
+    /// was selected by navigation: the first item that is neither a
+    /// whole-line history entry nor dangerous. Nothing is ever highlighted
+    /// before the user navigates.
+    static func top(_ items: [AutocompleteItem]) -> Int? {
+        items.firstIndex { !$0.dangerous && !$0.replacesLine }
     }
 
     static func next(_ current: Int?, count: Int) -> Int? {
@@ -138,35 +140,60 @@ enum AutocompleteSelection {
 
 enum AutocompleteVisibility {
     /// Show only with a non-empty buffer and at least one suggestion that
-    /// would change something.
+    /// would change something. An empty token (right after a space) only
+    /// shows when the user asked with Tab.
     static func shouldShow(
         buffer: AutocompleteBuffer,
-        suggestions: AutocompleteSuggestions
+        suggestions: AutocompleteSuggestions,
+        requested: Bool = false
     ) -> Bool {
         guard !buffer.text.isEmpty, !suggestions.items.isEmpty else { return false }
         let token = buffer.slice(start: suggestions.replaceStart, length: suggestions.replaceLength)
+        if token.isEmpty && !requested && !suggestions.items.contains(where: { $0.replacesLine }) {
+            return false
+        }
         return suggestions.items.contains { item in
             item.replacesLine ? item.text != buffer.text : item.text != token
         }
+    }
+
+    /// True when suggestions exist but are held back because the token is
+    /// empty, so Tab should open the popup instead of going to the shell.
+    static func canOpenWithTab(buffer: AutocompleteBuffer, suggestions: AutocompleteSuggestions) -> Bool {
+        !shouldShow(buffer: buffer, suggestions: suggestions)
+            && shouldShow(buffer: buffer, suggestions: suggestions, requested: true)
     }
 }
 
 /// `autocomplete-enter`.
 enum AutocompleteEnterMode: String {
+    /// Enter runs the command unless a row was selected by navigation.
+    case navigated
+    /// Enter inserts the selected row, or the top one.
     case accept
+    /// Enter always runs the command.
     case passthrough
 }
 
 enum AutocompleteKeyAction: Equatable {
     case next
     case previous
+    /// Insert the row selected by navigation.
+    case acceptSelected
+    /// Insert the top acceptable row (see `AutocompleteSelection.top`).
+    case acceptTop
+    /// Hide the popup and consume the key.
     case dismiss
-    case accept
+    /// Hide the popup and let the key through (Esc in vi keymaps, Enter
+    /// that runs the command).
+    case hideAndPassthrough
+    /// Show the held-back popup (Tab on an empty token).
+    case open
     /// Not ours: let the key flow to the terminal as usual.
     case passthrough
 }
 
-/// The keys the popup consumes while visible. Pure so it can be tested.
+/// What a key does with the popup. Pure so it can be tested.
 enum AutocompleteKeys {
     static let tab: UInt16 = 48
     static let enter: UInt16 = 36
@@ -176,15 +203,33 @@ enum AutocompleteKeys {
     static let up: UInt16 = 126
     static let right: UInt16 = 124
 
+    struct Context {
+        var visible: Bool
+        /// A row was selected by navigation in the current generation.
+        var navigated: Bool
+        /// There is a top acceptable row for Tab.
+        var hasTop: Bool
+        var cursorAtEnd: Bool
+        /// The shell is in a vi keymap, where Esc means something.
+        var viKeymap: Bool
+        /// Suggestions are held back for an empty token.
+        var canOpen: Bool
+        var enterMode: AutocompleteEnterMode
+    }
+
     static func action(
         keyCode: UInt16,
         characters: String?,
         modifiers: NSEvent.ModifierFlags,
-        enterMode: AutocompleteEnterMode,
-        hasSelection: Bool,
-        cursorAtEnd: Bool
+        context c: Context
     ) -> AutocompleteKeyAction {
         let mods = modifiers.intersection([.shift, .control, .option, .command])
+
+        guard c.visible else {
+            if c.canOpen, keyCode == tab, mods.isEmpty { return .open }
+            return .passthrough
+        }
+
         if mods == .control {
             switch characters?.lowercased() {
             case "n", "\u{0e}": return .next
@@ -193,22 +238,30 @@ enum AutocompleteKeys {
             }
         }
 
+        let acceptRow: AutocompleteKeyAction = c.navigated ? .acceptSelected : (c.hasTop ? .acceptTop : .passthrough)
         switch keyCode {
         case tab:
             if mods == .shift { return .previous }
-            return mods.isEmpty ? .next : .passthrough
+            return mods.isEmpty ? acceptRow : .passthrough
         case down:
             return mods.isEmpty ? .next : .passthrough
         case up:
             return mods.isEmpty ? .previous : .passthrough
         case escape:
-            return mods.isEmpty ? .dismiss : .passthrough
+            guard mods.isEmpty else { return .passthrough }
+            return c.viKeymap ? .hideAndPassthrough : .dismiss
         case enter, keypadEnter:
-            guard mods.isEmpty, enterMode == .accept, hasSelection else { return .passthrough }
-            return .accept
+            guard mods.isEmpty else { return .passthrough }
+            switch c.enterMode {
+            case .navigated: return c.navigated ? .acceptSelected : .hideAndPassthrough
+            case .accept:
+                if c.navigated { return .acceptSelected }
+                return c.hasTop ? .acceptTop : .hideAndPassthrough
+            case .passthrough: return .hideAndPassthrough
+            }
         case right:
-            guard mods.isEmpty, hasSelection, cursorAtEnd else { return .passthrough }
-            return .accept
+            guard mods.isEmpty, c.cursorAtEnd else { return .passthrough }
+            return acceptRow
         default:
             return .passthrough
         }

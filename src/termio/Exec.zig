@@ -19,6 +19,7 @@ const fastmem = @import("../fastmem.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
+const autocomplete = @import("../autocomplete/main.zig"); // slimer
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const Command = @import("../Command.zig");
@@ -760,6 +761,10 @@ const Subprocess = struct {
         // This is not apprt-specific, so we do it here.
         _ = env.orderedRemove("VTE_VERSION");
 
+        // slimer: set when the injected integration consumes the
+        // autocomplete secret (zsh).
+        var slimer_keep_token = false;
+
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
@@ -813,9 +818,20 @@ const Subprocess = struct {
                 "shell integration automatically injected shell={}",
                 .{integration.shell},
             );
+            slimer_keep_token = integration.shell == .zsh; // slimer
 
             break :shell integration.command;
         };
+
+        // slimer: only shells that use the autocomplete secret get it (the
+        // injected zsh integration, or PowerShell with the Slimer module);
+        // it never leaks into other shells' children.
+        if (!slimer_keep_token and !autocomplete.isPowerShell(switch (shell_command) {
+            .shell => |v| v,
+            .direct => |v| if (v.len > 0) v[0] else "",
+        })) {
+            _ = env.orderedRemove(autocomplete.token_env);
+        }
 
         // Add the environment variables that override any others.
         {

@@ -21,13 +21,20 @@
 //! - `p`: (Slimer 6C) the shell's process group id, decimal. Optional;
 //!   0 when absent.
 //! - `d`: (Slimer 6C) `1` when the shell left the line editor (zle
-//!   `line-finish`): the core forgets the buffer. Optional, default `0`.
+//!   `line-finish`, or the history hook): the core forgets the buffer.
+//!   Optional, default `0`.
+//! - `i`: (Slimer 6C) `1` on the first report after zle `line-init`: a
+//!   new line starts. Optional, default `0`.
+//! - `h`: (Slimer 6C) with `d=1`, the shell's history verdict for the line
+//!   that is about to run: `1` record `b` (the full command line), `0`
+//!   record nothing. Optional; absent means "no verdict".
 //! - `b`: the buffer, percent-encoded. The shell encodes `%`, `;`, every
 //!   C0 control (0x00-0x1F) and DEL (0x7F) as `%XX` with uppercase hex.
 //!   Everything else, including raw UTF-8, passes through. `b` must be
 //!   the last field; everything after `b=` is the payload.
 //!
-//! Every field is required. Duplicate fields, unknown versions, malformed
+//! `v`, `c`, `k`, `t` and `b` are required; `n`, `p`, `d`, `i` and `h` are
+//! optional. Duplicate fields, unknown versions, malformed
 //! numbers, malformed percent escapes, and oversized payloads discard the
 //! whole report. Unknown keys are skipped so a later revision can add
 //! fields without breaking older terminals.
@@ -107,6 +114,12 @@ pub const Command = struct {
     /// The shell left the line editor (`d=1`).
     deactivate: bool = false,
 
+    /// The first report after zle line-init (`i=1`).
+    line_init: bool = false,
+
+    /// History verdict (`h=`): null when absent.
+    history: ?bool = null,
+
     /// The command line, already percent-decoded. Untrusted data.
     pub fn buffer(self: *const Command) []const u8 {
         return self.data[self.buffer_off..][0..self.buffer_len];
@@ -173,6 +186,8 @@ fn parseBody(data: []u8) Error!Command {
     var nonce: ?[]u8 = null;
     var pgid: ?u32 = null;
     var deactivate: ?bool = null;
+    var line_init: ?bool = null;
+    var history: ?bool = null;
 
     var rest: []u8 = data;
     while (rest.len > 0) {
@@ -222,12 +237,13 @@ fn parseBody(data: []u8) Error!Command {
             pgid = parseNumber(value) orelse return error.InvalidNumber;
         } else if (std.mem.eql(u8, key, "d")) {
             if (deactivate != null) return error.DuplicateField;
-            deactivate = if (std.mem.eql(u8, value, "0"))
-                false
-            else if (std.mem.eql(u8, value, "1"))
-                true
-            else
-                return error.InvalidTruncated;
+            deactivate = try parseFlag(value);
+        } else if (std.mem.eql(u8, key, "i")) {
+            if (line_init != null) return error.DuplicateField;
+            line_init = try parseFlag(value);
+        } else if (std.mem.eql(u8, key, "h")) {
+            if (history != null) return error.DuplicateField;
+            history = try parseFlag(value);
         }
         // Unknown keys are skipped for forward compatibility.
     }
@@ -250,6 +266,8 @@ fn parseBody(data: []u8) Error!Command {
         .nonce_len = @intCast(nc.len),
         .pgid = pgid orelse 0,
         .deactivate = deactivate orelse false,
+        .line_init = line_init orelse false,
+        .history = history,
     };
 }
 
@@ -257,6 +275,12 @@ fn parseBody(data: []u8) Error!Command {
 /// (checked before parsing), so it fits in a u16.
 fn offsetIn(data: []const u8, sub: []const u8) u16 {
     return @intCast(@intFromPtr(sub.ptr) - @intFromPtr(data.ptr));
+}
+
+fn parseFlag(value: []const u8) Error!bool {
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.eql(u8, value, "1")) return true;
+    return error.InvalidTruncated;
 }
 
 /// Parse a non-empty string of ASCII digits into a u32. Anything else,
@@ -331,6 +355,25 @@ test "OSC 7704: secret, process group and deactivate fields" {
         try testing.expect(cmd.deactivate);
     }
 
+    // Line start and history verdicts.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice("7704;v=1;i=1;c=0;k=emacs;t=0;b=");
+        const cmd = p.end(0x07).?.autocomplete_buffer;
+        try testing.expect(cmd.line_init);
+        try testing.expect(cmd.history == null);
+    }
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice("7704;v=1;d=1;h=1;c=0;k=other;t=0;b=make %5C%0A V=1");
+        const cmd = p.end(0x07).?.autocomplete_buffer;
+        try testing.expect(cmd.deactivate);
+        try testing.expectEqual(true, cmd.history.?);
+        try testing.expectEqualStrings("make \\\n V=1", cmd.buffer());
+    }
+
     // Absent: empty secret, pgid 0, not a deactivate.
     {
         var p: Parser = .init(testing.allocator);
@@ -348,6 +391,9 @@ test "OSC 7704: secret, process group and deactivate fields" {
         "7704;v=1;n=ab;n=ab;c=0;k=emacs;t=0;b=",
         "7704;v=1;p=-1;c=0;k=emacs;t=0;b=",
         "7704;v=1;d=2;c=0;k=emacs;t=0;b=",
+        "7704;v=1;i=x;c=0;k=emacs;t=0;b=",
+        "7704;v=1;h=2;c=0;k=emacs;t=0;b=",
+        "7704;v=1;h=1;h=1;c=0;k=emacs;t=0;b=",
     };
     for (bad) |body| {
         var p: Parser = .init(testing.allocator);

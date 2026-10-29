@@ -165,6 +165,10 @@ pub const Message = union(enum) {
     /// receiver owns the payload and must call `deinit` on it.
     autocomplete_buffer: autocomplete.Update,
 
+    /// slimer: the autocomplete worker finished a query. The receiver owns
+    /// the result and must `destroy` it.
+    autocomplete_result: *autocomplete.OwnedResult,
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

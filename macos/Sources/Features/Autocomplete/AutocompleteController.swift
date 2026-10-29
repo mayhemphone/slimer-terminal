@@ -3,22 +3,35 @@ import SwiftUI
 import GhosttyKit
 
 /// Slimer autocomplete: one controller per surface. It listens for
-/// `ghosttyAutocompleteDidUpdate`, runs the core suggestion engine (on the
-/// main thread, coalesced to one query per run loop turn), shows or hides
-/// the popup, and handles the six popup keys while it is visible.
+/// `ghosttyAutocompleteDidUpdate` (posted when the shell reports a new
+/// command line and again when the core's background worker has a result),
+/// reads the result with `ghostty_surface_autocomplete_query` (which never
+/// blocks: it queues work and reports `pending` until the result arrives),
+/// shows or hides the popup, and handles the popup keys while it is visible.
 ///
-/// When the popup is hidden every key flows to the terminal exactly as
-/// before. Accepting never sends Enter: the core writes `CSI 7705 ~` (or
-/// `CSI 7706 ~` for a history line) and the shell's widget edits the line.
+/// Keys work like Warp: nothing is selected until the user navigates (arrows,
+/// Ctrl-N/P, Shift-Tab). Tab or Right at the end of the line inserts the top
+/// suggestion; Enter inserts only a row the user navigated to, otherwise it
+/// runs the command as typed (`autocomplete-enter = navigated`). When the
+/// popup is hidden every key flows to the terminal exactly as before, except
+/// Tab right after a space when suggestions are waiting. Accepting never
+/// sends Enter: the core writes `CSI 7705 ~` (or `CSI 7706 ~` for a history
+/// line) and the shell's widget edits the line.
 @MainActor
 final class AutocompleteController {
     private weak var surfaceView: Ghostty.SurfaceView?
     private var popup: AutocompletePopupView?
+    /// The suggestions for `buffer`, shown or held back.
     private var suggestions: AutocompleteSuggestions?
     private var buffer: AutocompleteBuffer?
+    /// Selected by navigation in the current generation only.
     private var selected: Int?
+    /// The shell's keymap is vi (insert or command).
+    private var viKeymap = false
     /// After Esc, stay hidden until the buffer changes.
     private var suppressedBuffer: AutocompleteBuffer?
+    /// Tab on an empty token opened the popup for this buffer.
+    private var openedBuffer: AutocompleteBuffer?
     private var refreshScheduled = false
     private var observers: [NSObjectProtocol] = []
 
@@ -126,21 +139,24 @@ final class AutocompleteController {
     private func refresh() {
         guard let view = surfaceView, let surface = view.surface,
               config?.autocompleteEnabled ?? true,
-              view.focused, view.window?.isKeyWindow == true else {
-            hide()
+              view.focused, view.window?.isKeyWindow == true,
+              !view.hasMarkedText() else {
+            reset()
             return
         }
 
         var cBuffer = ghostty_autocomplete_buffer_s()
         guard ghostty_surface_autocomplete_buffer(surface, &cBuffer), cBuffer.len > 0,
               let bytes = cBuffer.buffer else {
-            hide()
+            reset()
             return
         }
         let text = bytes.withMemoryRebound(to: UInt8.self, capacity: Int(cBuffer.len)) {
             String(bytes: UnsafeBufferPointer(start: $0, count: Int(cBuffer.len)), encoding: .utf8) ?? ""
         }
         let current = AutocompleteBuffer(text: text, cursor: Int(cBuffer.cursor))
+        viKeymap = cBuffer.keymap == UInt8(GHOSTTY_AUTOCOMPLETE_KEYMAP_VIINS.rawValue)
+            || cBuffer.keymap == UInt8(GHOSTTY_AUTOCOMPLETE_KEYMAP_VICMD.rawValue)
         if let suppressed = suppressedBuffer {
             if suppressed == current {
                 hide()
@@ -150,25 +166,33 @@ final class AutocompleteController {
         }
 
         var result = ghostty_autocomplete_result_s()
-        guard ghostty_surface_autocomplete_query(surface, &result) else {
-            hide()
+        let ready = ghostty_surface_autocomplete_query(surface, &result)
+        if !ready && result.pending {
+            // The worker is on it; the next update brings the result. Keep
+            // what is on screen, but a new line invalidates the selection.
+            if suggestions?.generation != result.generation { selected = nil }
             return
         }
-        let next = AutocompleteSuggestions(result, maxItems: config?.autocompleteMaxItems ?? 8)
-        guard AutocompleteVisibility.shouldShow(buffer: current, suggestions: next) else {
-            hide()
+        guard ready else {
+            reset()
             return
         }
 
-        // Keep the selection on the same text if it is still offered.
-        let previousText = selected.flatMap { index in suggestions?.items[safe: index]?.text }
+        let next = AutocompleteSuggestions(result, maxItems: config?.autocompleteMaxItems ?? 8)
+        if next.generation != suggestions?.generation { selected = nil }
         buffer = current
         suggestions = next
-        if let previousText, let index = next.items.firstIndex(where: { $0.text == previousText }),
-           !next.items[index].dangerous {
-            selected = index
-        } else {
-            selected = AutocompleteSelection.initial(next.items)
+        if openedBuffer != nil && openedBuffer != current { openedBuffer = nil }
+
+        guard AutocompleteVisibility.shouldShow(
+            buffer: current,
+            suggestions: next,
+            requested: openedBuffer == current
+        ) else {
+            // Keep the suggestions so Tab on an empty token can open them.
+            popup?.isHidden = true
+            selected = nil
+            return
         }
         show(in: view)
     }
@@ -203,8 +227,9 @@ final class AutocompleteController {
         let cellHeight = max(cell.height, 1)
         let tokenWidth = Double(suggestions.replaceColumns) * cell.width
         let bounds = view.bounds
+        let width = min(size.width, bounds.width)
         var originX = max(0, x - tokenWidth)
-        originX = min(originX, max(0, bounds.width - size.width))
+        originX = min(originX, max(0, bounds.width - width))
         // The ime point's y is the bottom of the cursor cell measured from
         // the top; this view's origin is bottom-left.
         let cursorBottom = bounds.height - y
@@ -214,14 +239,22 @@ final class AutocompleteController {
         } else {
             originY = max(0, min(bounds.height - size.height, cursorBottom + cellHeight))
         }
-        popup.frame = NSRect(x: originX, y: originY, width: size.width, height: size.height)
+        popup.frame = NSRect(x: originX, y: originY, width: width, height: size.height)
         popup.isHidden = false
     }
 
+    /// Hide the popup. Suggestions are kept until the next refresh.
     func hide() {
         popup?.isHidden = true
-        suggestions = nil
         selected = nil
+    }
+
+    /// Hide and forget everything for this line.
+    private func reset() {
+        hide()
+        suggestions = nil
+        buffer = nil
+        openedBuffer = nil
     }
 
     // MARK: - Surface events
@@ -232,19 +265,40 @@ final class AutocompleteController {
 
     // MARK: - Keys
 
-    /// Handle a key while the popup is visible. Returns true if consumed.
-    /// When the popup is hidden this always returns false so the key flows
-    /// to the terminal as usual.
+    /// Handle a key. Returns true if consumed. While the popup is hidden
+    /// this returns false (the key flows to the terminal as usual) except
+    /// for Tab on an empty token with suggestions waiting.
     func handleKey(_ event: NSEvent) -> Bool {
-        guard isVisible, let suggestions, let buffer else { return false }
+        // Composing with an input method: the IME owns every key.
+        if surfaceView?.hasMarkedText() == true {
+            hide()
+            return false
+        }
+        guard let suggestions, let buffer else { return false }
         let action = AutocompleteKeys.action(
             keyCode: event.keyCode,
             characters: event.charactersIgnoringModifiers,
             modifiers: event.modifierFlags,
-            enterMode: config?.autocompleteEnter ?? .accept,
-            hasSelection: selected != nil,
-            cursorAtEnd: buffer.cursorAtEnd
+            context: .init(
+                visible: isVisible,
+                navigated: selected != nil,
+                hasTop: AutocompleteSelection.top(suggestions.items) != nil,
+                cursorAtEnd: buffer.cursorAtEnd,
+                viKeymap: viKeymap,
+                canOpen: AutocompleteVisibility.canOpenWithTab(buffer: buffer, suggestions: suggestions),
+                enterMode: config?.autocompleteEnter ?? .navigated
+            )
         )
+        // The line changed and its result isn't here yet: the shown rows
+        // are stale and the core would refuse them. Let the key through.
+        if isStale(suggestions) {
+            switch action {
+            case .acceptSelected, .acceptTop, .open:
+                hide()
+                return false
+            default: break
+            }
+        }
         switch action {
         case .next:
             selected = AutocompleteSelection.next(selected, count: suggestions.items.count)
@@ -254,22 +308,40 @@ final class AutocompleteController {
             selected = AutocompleteSelection.previous(selected, count: suggestions.items.count)
             popup?.select(selected)
             return true
-        case .dismiss:
-            suppressedBuffer = buffer
-            if let surface = surfaceView?.surface { ghostty_surface_autocomplete_dismiss(surface) }
-            hide()
-            return true
-        case .accept:
+        case .acceptSelected:
             guard let index = selected, let item = suggestions.items[safe: index] else { return false }
             accept(item, generation: suggestions.generation)
             return true
+        case .acceptTop:
+            guard let index = AutocompleteSelection.top(suggestions.items) else { return false }
+            accept(suggestions.items[index], generation: suggestions.generation)
+            return true
+        case .dismiss:
+            dismiss(buffer)
+            return true
+        case .hideAndPassthrough:
+            if event.keyCode == AutocompleteKeys.escape { dismiss(buffer) } else { hide() }
+            return false
+        case .open:
+            openedBuffer = buffer
+            if let view = surfaceView { show(in: view) }
+            return true
         case .passthrough:
-            // Enter in passthrough mode runs the line: the popup goes away.
-            if event.keyCode == AutocompleteKeys.enter || event.keyCode == AutocompleteKeys.keypadEnter {
-                hide()
-            }
             return false
         }
+    }
+
+    private func isStale(_ suggestions: AutocompleteSuggestions) -> Bool {
+        guard let surface = surfaceView?.surface else { return true }
+        var cBuffer = ghostty_autocomplete_buffer_s()
+        let live = ghostty_surface_autocomplete_buffer(surface, &cBuffer)
+        return !live || cBuffer.generation != suggestions.generation
+    }
+
+    private func dismiss(_ buffer: AutocompleteBuffer) {
+        suppressedBuffer = buffer
+        if let surface = surfaceView?.surface { ghostty_surface_autocomplete_dismiss(surface) }
+        hide()
     }
 
     private func accept(_ item: AutocompleteItem, generation: UInt64) {

@@ -18,13 +18,16 @@
 //! Encoding is the OSC 7704 payload encoding (`%`, `;`, C0 and DEL
 //! become `%XX`), so a multi-line command stays on one line. Lines
 //! starting with `#` are comments. At most `max_entries` are kept in
-//! memory; the file itself only grows (rotation is future work).
+//! memory. The file is appended with `O_APPEND` and, when it holds more
+//! than `max_entries` lines at load, rewritten to keep the newest ones.
+//! All of this runs on the autocomplete worker thread.
 const History = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("main.zig");
+const Fs = @import("Fs.zig");
 
 const log = std.log.scoped(.autocomplete);
 
@@ -134,8 +137,9 @@ pub fn ensureLoaded(self: *History) void {
         if (readTail(self.alloc, self.io, p)) |data| {
             defer self.alloc.free(data);
             parseLog(self.alloc, data, &log_entries) catch {};
+            rotate(p, data);
         } else |err| switch (err) {
-            error.FileNotFound => {},
+            error.OpenFailed => {},
             else => log.warn("autocomplete: cannot read history log err={}", .{err}),
         }
     }
@@ -147,7 +151,7 @@ pub fn ensureLoaded(self: *History) void {
             defer self.alloc.free(data);
             parseZsh(self.alloc, data, &zsh_entries) catch {};
         } else |err| switch (err) {
-            error.FileNotFound => {},
+            error.OpenFailed => {},
             else => log.debug("autocomplete: cannot import zsh history err={}", .{err}),
         }
     }
@@ -268,43 +272,53 @@ fn bumpToken(self: *History, command: []const u8, word: []const u8, e: Entry) vo
     tg.value_ptr.bump(e.ts, e.cwd_hash);
 }
 
+const log_header = "# slimer autocomplete history v1\n";
+
 fn append(self: *History, path: []const u8, line: []const u8, cwd: []const u8, now: i64) !void {
     if (std.fs.path.dirname(path)) |dir| {
         Io.Dir.cwd().createDirPath(self.io, dir) catch {};
     }
-    const file = try Io.Dir.cwd().createFile(self.io, path, .{
-        .truncate = false,
-        .permissions = .fromMode(0o600),
-    });
-    defer file.close(self.io);
-
-    var buf: [3 * (max_line_bytes + 1024) + 64]u8 = undefined;
+    var buf: [3 * (max_line_bytes + 1024) + 128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    const len = try file.length(self.io);
-    if (len == 0) try w.writeAll("# slimer autocomplete history v1\n");
+    const exists = if (Fs.infoRegular(path)) |info| info.size > 0 else |_| false;
+    if (!exists) try w.writeAll(log_header);
     try w.print("{d};", .{now});
     try wire.percentEncode(&w, cwd[0..@min(cwd.len, 1024)]);
     try w.writeByte(';');
     try wire.percentEncode(&w, line);
     try w.writeByte('\n');
-    try file.writePositionalAll(self.io, w.buffered(), len);
+    try Fs.appendFile(path, w.buffered());
 }
 
-fn readTail(alloc: Allocator, io: Io, path: []const u8) ![]u8 {
-    const file = try Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const len = try file.length(io);
-    const start = if (len > max_read_bytes) len - max_read_bytes else 0;
-    const size: usize = @intCast(len - start);
-    const data = try alloc.alloc(u8, size);
-    errdefer alloc.free(data);
-    const n = try file.readPositionalAll(io, data, start);
-    if (start == 0) return data[0..n];
-    // Drop the partial first line.
-    const nl = std.mem.indexOfScalar(u8, data[0..n], '\n') orelse n;
-    const rest = n - @min(n, nl + 1);
-    std.mem.copyForwards(u8, data[0..rest], data[n - rest .. n]);
-    return data[0..rest];
+/// If the log text read at load holds more than `max_entries` entry lines,
+/// rewrite the file with only the newest `max_entries`.
+fn rotate(path: []const u8, data: []const u8) void {
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |l| {
+        if (l.len > 0 and l[0] != '#') count += 1;
+    }
+    if (count <= max_entries) return;
+    var skip = count - max_entries;
+    var off: usize = 0;
+    while (skip > 0 and off < data.len) {
+        const nl = std.mem.indexOfScalarPos(u8, data, off, '\n') orelse data.len;
+        if (nl > off and data[off] != '#') skip -= 1;
+        off = @min(data.len, nl + 1);
+    }
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+    const out = std.mem.concat(a, u8, &.{ log_header, data[off..] }) catch return;
+    defer a.free(out);
+    Fs.replaceFile(path, out) catch |err| {
+        log.warn("autocomplete: cannot rotate history log err={}", .{err});
+    };
+}
+
+fn readTail(alloc: Allocator, io: Io, path: []const u8) Fs.ReadError![]u8 {
+    _ = io;
+    return Fs.readRegularTail(alloc, path, max_read_bytes);
 }
 
 fn percentDecode(alloc: Allocator, s: []const u8) ![]u8 {
@@ -495,6 +509,43 @@ test "autocomplete history: log round trip, ignore space, stats" {
         try testing.expectEqual(History.cwdHash("/a;b"), h.entries.items[3].cwd_hash);
         try testing.expect(h.lineStat("git push") == null);
     }
+}
+
+test "autocomplete history: log rotation keeps the newest entries" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(alloc);
+    try data.appendSlice(alloc, log_header);
+    var i: usize = 0;
+    while (i < max_entries + 50) : (i += 1) try data.print(alloc, "{d};%2F;cmd {d}\n", .{ i, i });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "history.log", .data = data.items });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(testing.io, &path_buf);
+    const log_path = try std.fs.path.join(alloc, &.{ path_buf[0..n], "history.log" });
+    defer alloc.free(log_path);
+
+    var h: History = .init(alloc, testing.io);
+    defer h.deinit();
+    try h.setPaths(log_path, null);
+    h.ensureLoaded();
+    try testing.expectEqual(@as(usize, max_entries), h.entries.items.len);
+
+    const after = try Fs.readRegular(alloc, log_path, 16 * 1024 * 1024);
+    defer alloc.free(after);
+    try testing.expect(std.mem.startsWith(u8, after, log_header));
+    var lines: usize = 0;
+    var it = std.mem.splitScalar(u8, after, '\n');
+    while (it.next()) |l| {
+        if (l.len > 0 and l[0] != '#') lines += 1;
+    }
+    try testing.expectEqual(@as(usize, max_entries), lines);
+    try testing.expect(std.mem.indexOf(u8, after, ";cmd 49\n") == null);
+    try testing.expect(std.mem.indexOf(u8, after, ";cmd 50\n") != null);
 }
 
 test "autocomplete history: cap keeps the newest entries" {

@@ -360,6 +360,8 @@ _ghostty_deferred_init() {
        builtin zmodload zsh/datetime 2>/dev/null &&
        is-at-least 5.3; then
       builtin typeset -g _ghostty_ac_last=
+      # Set by zle line-init: the next report carries i=1 (a new line).
+      builtin typeset -gi _ghostty_ac_first=0
 
       # The name the main keymap is linked to (`bindkey -v` links it to
       # viins), because $KEYMAP reports "main". Resolved at every prompt
@@ -471,8 +473,18 @@ _ghostty_deferred_init() {
           t=1
         fi
         _ghostty_ac_encode "$buf"
+        builtin local first=
+        if (( _ghostty_ac_first )); then
+          first=';i=1'
+          _ghostty_ac_first=0
+        fi
         builtin print -rnu $_ghostty_fd -- \
-          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$';c='$CURSOR';k='$key';t='$t';b='$REPLY$'\a'
+          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$$first';c='$CURSOR';k='$key';t='$t';b='$REPLY$'\a'
+      }
+
+      _ghostty_ac_line_init() {
+        _ghostty_ac_first=1
+        _ghostty_ac_last=
       }
 
       # The line editor is done with this line (accepted, interrupted or
@@ -481,7 +493,35 @@ _ghostty_deferred_init() {
       _ghostty_ac_finish() {
         _ghostty_ac_last=
         builtin print -rnu $_ghostty_fd -- \
-          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$';d=1;c=0;k=other;t=0;b=\a'
+          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$$';d=1;c=0;k=other;t=0;b=\a'
+      }
+
+      # zsh is about to add the line to history: send the terminal the full
+      # command line (all physical lines of a multi-line command) to record,
+      # or h=0 when this line must not be recorded: a leading space,
+      # HISTORY_IGNORE, or no history file (`fc -p` incognito). Never
+      # changes what zsh itself does with the line.
+      _ghostty_ac_addhist() {
+        builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+        builtin local line=${1%$'\n'} h=1 t=0 REPLY
+        if [[ -z ${HISTFILE-} || $line == [[:space:]]* ]]; then
+          h=0
+        elif [[ -n ${HISTORY_IGNORE-} && $line == ${~HISTORY_IGNORE} ]]; then
+          h=0
+        fi
+        if (( h )); then
+          builtin setopt local_options no_multibyte
+          if (( ${#line} > 4096 )); then
+            line=${line[1,4096]}
+            t=1
+          fi
+          _ghostty_ac_encode "$line"
+        else
+          REPLY=
+        fi
+        builtin print -rnu $_ghostty_fd -- \
+          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$';d=1;h='$h';c=0;k=other;t='$t';b='$REPLY$'\a'
+        builtin return 0
       }
 
       # Read an accept payload into REPLY (decoded). Keys are read one at a
@@ -543,6 +583,8 @@ _ghostty_deferred_init() {
       done
       add-zle-hook-widget line-pre-redraw _ghostty_ac_report
       add-zle-hook-widget line-finish _ghostty_ac_finish
+      add-zle-hook-widget line-init _ghostty_ac_line_init
+      builtin autoload -Uz -- add-zsh-hook && add-zsh-hook zshaddhistory _ghostty_ac_addhist
 
       # A new prompt always reports, even if the buffer matches the last,
       # and picks up a keymap change (`bindkey -v` at the prompt).

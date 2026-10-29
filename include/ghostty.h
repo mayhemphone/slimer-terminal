@@ -975,7 +975,8 @@ typedef enum {
 #define GHOSTTY_AUTOCOMPLETE_MAX_ITEMS 8
 
 // slimer: autocomplete.CItem. Strings are NOT NUL-terminated and point at
-// surface-owned memory valid until the next query on that surface.
+// surface-owned memory valid until the next autocomplete update on that
+// surface.
 // `match_len` is the number of bytes at the start of `display` that
 // matched what was typed. `kind` is a ghostty_autocomplete_kind_e;
 // HISTORY items replace the whole line (accept_line), others the token.
@@ -1001,6 +1002,9 @@ typedef struct {
   uint32_t replace_len;
   uint32_t replace_cols;
   uint64_t generation;
+  // No result yet: a query is running on the worker; keep the popup as
+  // is and wait for the next GHOSTTY_ACTION_AUTOCOMPLETE_UPDATE.
+  bool pending;
 } ghostty_autocomplete_result_s;
 
 // terminal.Scrollbar
