@@ -21,22 +21,28 @@ enum ThemeRuleMatcher {
 
     /// Returns the winning rule, or `nil` if none match.
     ///
-    /// Precedence: highest `priority`; then the most specific match (longest path prefix /
-    /// longest value); then the earliest rule in the file.
+    /// Precedence: highest `priority`; then, only between rules of the same kind, the most
+    /// specific match (deepest path prefix; remote `@host` title over local host name;
+    /// longest value); then the earliest rule in the file. Specificity is never compared
+    /// across kinds because the scores mean different things.
     static func match(rules: [ThemeRule], context: Context, home: String) -> ThemeRule? {
-        var best: (rule: ThemeRule, specificity: Int, index: Int)?
-        for (index, rule) in rules.enumerated() {
-            guard let specificity = specificity(of: rule, context: context, home: home) else { continue }
-            if let current = best {
-                if rule.priority > current.rule.priority ||
-                    (rule.priority == current.rule.priority && specificity > current.specificity) {
-                    best = (rule, specificity, index)
-                }
-            } else {
-                best = (rule, specificity, index)
-            }
+        // Highest priority among matches, then pick within that tier.
+        let matches = rules.enumerated().compactMap { index, rule -> (ThemeRule, Int, Int)? in
+            guard let score = specificity(of: rule, context: context, home: home) else { return nil }
+            return (rule, score, index)
         }
-        return best?.rule
+        guard let top = matches.map({ $0.0.priority }).max() else { return nil }
+        let tier = matches.filter { $0.0.priority == top }
+
+        // The earliest rule in the tier fixes the kind; within that kind, the most specific
+        // wins (ties keep file order).
+        guard let first = tier.first else { return nil }
+        let sameKind = tier.filter { $0.0.match.kind == first.0.match.kind }
+        var best = first
+        for candidate in sameKind where candidate.1 > best.1 {
+            best = candidate
+        }
+        return best.0
     }
 
     /// `nil` if the rule does not match; otherwise a specificity score (higher is more
@@ -53,10 +59,12 @@ enum ThemeRuleMatcher {
         case .hostname(let host):
             let wanted = host.lowercased()
             guard !wanted.isEmpty else { return nil }
-            if context.localHostnames.contains(where: { $0.lowercased() == wanted }) {
-                return wanted.count
+            // A remote session (`user@host:` in the title) is more specific than the machine
+            // the app runs on, so it ranks above a local-name match.
+            if let title = context.title, titleNamesRemoteHost(title, host: wanted) {
+                return remoteHostScore + wanted.count
             }
-            if let title = context.title?.lowercased(), title.contains("@" + wanted) {
+            if context.localHostnames.contains(where: { $0.lowercased() == wanted }) {
                 return wanted.count
             }
             return nil
@@ -65,6 +73,23 @@ enum ThemeRuleMatcher {
             guard let title = context.title, titleNamesCommand(title, command: command) else { return nil }
             return command.count
         }
+    }
+
+    static let remoteHostScore = 10_000
+
+    /// True if `title` contains `@host` followed by a boundary (`:`, whitespace, `.`, or the
+    /// end), case-insensitive. `@prod` does not match `@production`.
+    static func titleNamesRemoteHost(_ title: String, host: String) -> Bool {
+        let haystack = title.lowercased()
+        let needle = "@" + host.lowercased()
+        var searchStart = haystack.startIndex
+        while let range = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
+            if range.upperBound == haystack.endIndex { return true }
+            let next = haystack[range.upperBound]
+            if next == ":" || next == "." || next.isWhitespace { return true }
+            searchStart = range.upperBound
+        }
+        return false
     }
 
     // MARK: Paths
