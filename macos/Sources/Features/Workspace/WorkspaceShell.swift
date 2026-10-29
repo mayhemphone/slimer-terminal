@@ -21,15 +21,7 @@ enum WorkspaceShell {
     /// BOM, soft hyphen, tag characters, ...), or U+2028/U+2029. Plain spaces
     /// and any other printable Unicode are fine.
     static func isSafeToInsert(_ text: String) -> Bool {
-        for scalar in text.unicodeScalars {
-            switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator:
-                return false
-            default:
-                break
-            }
-        }
-        return true
+        SlimerUnsafeText.isSafe(text)
     }
 
     /// Whether a path may be typed into a shell inside single quotes. On top
@@ -50,15 +42,14 @@ enum WorkspaceShell {
     /// terminal. The `text:` payload is parsed with Zig string-literal
     /// escapes, so backslashes in `text` are doubled.
     ///
-    /// - Parameters:
-    ///   - clearLine: prefix a single Ctrl-U (app-generated, not user data) to
-    ///     clear whatever is already on the shell's input line.
-    ///   - pressEnter: append Enter (`\r`).
+    /// Nothing is ever sent to clear the shell's input line: line-kill keys
+    /// differ between shells and keymaps, and leftover text would be run.
+    /// Enter (`\r`) is appended only when `pressEnter` is set, which callers do
+    /// only after `SurfaceView.slimerIdlePrompt` returned true.
     ///
     /// Callers must have checked `isSafeToInsert` on `text` first.
-    static func textBindingAction(_ text: String, clearLine: Bool = false, pressEnter: Bool) -> String {
-        var payload = clearLine ? "\\x15" : ""
-        payload += text.replacingOccurrences(of: "\\", with: "\\\\")
+    static func textBindingAction(_ text: String, pressEnter: Bool) -> String {
+        var payload = text.replacingOccurrences(of: "\\", with: "\\\\")
         if pressEnter { payload += "\\r" }
         return "text:" + payload
     }

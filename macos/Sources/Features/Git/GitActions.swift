@@ -11,10 +11,14 @@ import Foundation
 enum GitShellQuoting {
     enum ValidationError: Error, Equatable {
         case empty
-        /// C0/C1 control characters, DEL, U+2028/U+2029 or bidi overrides.
+        /// Characters rejected by `SlimerUnsafeText` (C0/C1 controls, DEL,
+        /// Unicode format characters including bidi controls, U+2028/U+2029).
         case containsControlCharacters
         /// A leading `-` could be parsed as an option by the shell command.
         case leadingDash
+        /// `'` or `\`. fish treats `\'` and `\\` as escapes inside single
+        /// quotes, so no single quoting scheme is safe in every shell.
+        case quoteOrBackslash
     }
 
     /// Characters that never need quoting in a POSIX shell word.
@@ -30,9 +34,8 @@ enum GitShellQuoting {
     static func validate(_ argument: String) throws {
         guard !argument.isEmpty else { throw ValidationError.empty }
         guard !argument.hasPrefix("-") else { throw ValidationError.leadingDash }
-        for scalar in argument.unicodeScalars where isForbidden(scalar) {
-            throw ValidationError.containsControlCharacters
-        }
+        guard SlimerUnsafeText.isSafe(argument) else { throw ValidationError.containsControlCharacters }
+        guard !argument.contains("'"), !argument.contains("\\") else { throw ValidationError.quoteOrBackslash }
     }
 
     /// `true` when `validate` would succeed.
@@ -41,27 +44,15 @@ enum GitShellQuoting {
     }
 
     /// Returns `argument` ready to be pasted as one shell word. Plain identifiers are
-    /// returned unchanged; anything else is wrapped in single quotes with embedded
-    /// single quotes escaped as `'\''`.
+    /// returned unchanged; anything else is wrapped in single quotes. Arguments
+    /// containing `'` or `\` never get here (`validate` rejects them), so the
+    /// quoted form means the same thing in sh, bash, zsh and fish.
     static func quote(_ argument: String) throws -> String {
         try validate(argument)
         if argument.unicodeScalars.allSatisfy({ safeScalars.contains($0) }) {
             return argument
         }
-        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    private static func isForbidden(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x00...0x1F, 0x7F, 0x80...0x9F:
-            return true // C0, DEL, C1
-        case 0x2028, 0x2029:
-            return true // line/paragraph separator
-        case 0x202A...0x202E, 0x2066...0x2069:
-            return true // bidi embeddings, overrides and isolates
-        default:
-            return false
-        }
+        return "'" + argument + "'"
     }
 }
 

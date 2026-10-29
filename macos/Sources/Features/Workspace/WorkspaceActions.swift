@@ -11,9 +11,10 @@ import GhosttyKit
 ///   in a new tab via `working_directory`, which never goes through a shell.
 /// - Recent directories are learned from the shell (untrusted) and are never
 ///   typed; they always open via `working_directory`.
-/// - Nothing is typed with Enter into a surface whose foreground process is
-///   not the shell (`needsConfirmQuit`). At an idle prompt, typed text is
-///   prefixed with one Ctrl-U to clear any half-typed input first.
+/// - Enter is pressed only when the shell sits at an empty primary prompt
+///   (`SurfaceView.slimerIdlePrompt`, OSC 133 shell integration). Otherwise
+///   commands are typed without Enter and "go to here" opens a new tab.
+///   Nothing is ever sent to clear the user's input line.
 ///
 /// Main thread only.
 enum WorkspaceActions {
@@ -98,11 +99,11 @@ enum WorkspaceActions {
         }
         store.recordUse(command: command)
 
-        // A program other than the shell is in the foreground: insert the
-        // text only (no Ctrl-U, no Enter) so nothing is executed blindly.
-        let busy = target.needsConfirmQuit
+        // Not at an empty prompt (a program is running, text is already typed,
+        // or no shell integration): insert the text only, never Enter.
+        let idle = target.slimerIdlePrompt
         controller.performAction(
-            WorkspaceShell.textBindingAction(text, clearLine: !busy, pressEnter: !busy && !command.confirm),
+            WorkspaceShell.textBindingAction(text, pressEnter: idle && !command.confirm),
             on: target
         )
     }
@@ -132,14 +133,14 @@ enum WorkspaceActions {
                 open(path: path, mode: .newWindow, startup: startup, from: nil)
                 return
             }
-            // Fall back to a new tab when the path can't be typed safely or a
-            // program other than the shell is running (Enter would go to it).
-            guard WorkspaceShell.isSafeToType(path: path), !target.needsConfirmQuit else {
+            // Fall back to a new tab when the path can't be typed safely or the
+            // shell is not at an empty prompt (Enter would run other text).
+            guard WorkspaceShell.isSafeToType(path: path), target.slimerIdlePrompt else {
                 openNewTab(path: path, startup: nil, from: target)
                 return
             }
             controller.performAction(
-                WorkspaceShell.textBindingAction(WorkspaceShell.cdCommand(to: path), clearLine: true, pressEnter: true),
+                WorkspaceShell.textBindingAction(WorkspaceShell.cdCommand(to: path), pressEnter: true),
                 on: target
             )
 

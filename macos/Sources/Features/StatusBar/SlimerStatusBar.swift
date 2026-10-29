@@ -18,16 +18,31 @@ struct SlimerStatusBarModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let position = ghostty.config.slimerStatusBar
-        let background = ghostty.config.backgroundColor
-        VStack(spacing: 0) {
-            if position == .top {
-                SlimerStatusBar(surfaceView: surfaceView, background: background)
+        let fallbackBackground = ghostty.config.backgroundColor
+        GeometryReader { geo in
+            // Very short panes keep every row for the terminal.
+            let show = position != .hidden && SlimerStatusBar.fits(inLeafHeight: geo.size.height)
+            VStack(spacing: 0) {
+                if show && position == .top {
+                    SlimerStatusBar(surfaceView: surfaceView, fallbackBackground: fallbackBackground)
+                }
+                content
+                if show && position == .bottom {
+                    SlimerStatusBar(surfaceView: surfaceView, fallbackBackground: fallbackBackground)
+                }
             }
-            content
-            if position == .bottom {
-                SlimerStatusBar(surfaceView: surfaceView, background: background)
-            }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .clipped()
+        .onAppear { releaseModelIfHidden(position) }
+        .onChange(of: position) { releaseModelIfHidden($0) }
+    }
+
+    /// Hiding the bar at runtime frees the surface's model and its git
+    /// subscription; showing it again creates a fresh one.
+    private func releaseModelIfHidden(_ position: Ghostty.Config.SlimerStatusBarPosition) {
+        guard position == .hidden else { return }
+        SlimerStatusBarModel.removeModel(for: surfaceView)
     }
 }
 
@@ -35,14 +50,32 @@ struct SlimerStatusBarModifier: ViewModifier {
 struct SlimerStatusBar: View {
     static let height: CGFloat = 22
 
+    /// The bar only shows in leaves at least this many bar heights tall.
+    static let minimumLeafHeightMultiple: CGFloat = 3
+
+    static func fits(inLeafHeight leafHeight: CGFloat) -> Bool {
+        leafHeight >= height * minimumLeafHeightMultiple
+    }
+
+    /// Height to add to a surface's requested initial size (`window-height`)
+    /// so the terminal still gets the configured rows when the bar shows.
+    /// Main thread only (called from the initial-size action handler).
+    static var initialHeightExtra: CGFloat {
+        initialHeightExtra(for: (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config.slimerStatusBar ?? .bottom)
+    }
+
+    static func initialHeightExtra(for position: Ghostty.Config.SlimerStatusBarPosition) -> CGFloat {
+        position == .hidden ? 0 : height
+    }
+
     @ObservedObject private var model: SlimerStatusBarModel
-    private let background: Color
+    private let fallbackBackground: Color
 
     @State private var showGitPopover = false
 
-    init(surfaceView: Ghostty.SurfaceView, background: Color) {
+    init(surfaceView: Ghostty.SurfaceView, fallbackBackground: Color) {
         self.model = SlimerStatusBarModel.model(for: surfaceView)
-        self.background = background
+        self.fallbackBackground = fallbackBackground
     }
 
     var body: some View {
@@ -68,7 +101,7 @@ struct SlimerStatusBar: View {
                     .help("Claude Code is running in this terminal")
                     .accessibilityLabel("Claude Code running")
             }
-            ClaudeButton(model: model)
+            ClaudeButton(surfaceView: model.surfaceView)
         }
         .font(.system(size: 11))
         .lineLimit(1)
@@ -79,6 +112,10 @@ struct SlimerStatusBar: View {
         .environment(\.colorScheme, NSColor(background).isLightColor ? .light : .dark)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Terminal status bar")
+    }
+
+    private var background: Color {
+        model.background ?? fallbackBackground
     }
 
     // MARK: Chips
@@ -115,7 +152,7 @@ struct SlimerStatusBar: View {
             GitChipLabel(state: git)
         }
         .buttonStyle(.plain)
-        .help("Git: \(git.headLabel)")
+        .help("Git: \(SlimerUnsafeText.sanitizedForDisplay(git.headLabel))")
         .popover(isPresented: $showGitPopover, arrowEdge: .bottom) {
             if let surfaceView = model.surfaceView {
                 GitPopoverView(state: git, surfaceView: surfaceView) {
@@ -151,7 +188,8 @@ struct GitChipLabel: View {
         HStack(spacing: 4) {
             Image(systemName: state.isDetached ? "smallcircle.filled.circle" : "arrow.triangle.branch")
                 .font(.system(size: 9))
-            Text(state.headLabel)
+            // Branch names come from the repository (untrusted); display only.
+            Text(SlimerUnsafeText.sanitizedForDisplay(state.headLabel))
                 .truncationMode(.middle)
                 .frame(maxWidth: 180, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)

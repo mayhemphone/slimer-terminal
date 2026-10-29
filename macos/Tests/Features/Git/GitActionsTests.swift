@@ -17,9 +17,20 @@ struct GitShellQuotingTests {
         #expect(try GitShellQuoting.quote("ünïcödé") == "'ünïcödé'")
     }
 
-    @Test func embeddedSingleQuotesAreEscaped() throws {
-        #expect(try GitShellQuoting.quote("it's") == "'it'\\''s'")
-        #expect(try GitShellQuoting.quote("'") == "''\\'''")
+    @Test(arguments: ["it's", "'", "a\\b", "\\", "a\\'; touch PWNED #"])
+    func rejectsQuotesAndBackslashes(name: String) {
+        // fish treats \' and \\ as escapes inside single quotes.
+        #expect(throws: GitShellQuoting.ValidationError.quoteOrBackslash) {
+            try GitShellQuoting.quote(name)
+        }
+        #expect(!GitShellQuoting.isSafe(name))
+    }
+
+    @Test(arguments: ["a\u{200B}b", "a\u{FEFF}b", "a\u{00AD}b", "a\u{200E}b", "a\u{061C}b", "a\u{E0041}b"])
+    func rejectsFormatCharacters(name: String) {
+        #expect(throws: GitShellQuoting.ValidationError.containsControlCharacters) {
+            try GitShellQuoting.quote(name)
+        }
     }
 
     @Test func rejectsEmpty() {
@@ -104,7 +115,10 @@ struct GitActionsTests {
     @Test func switchAndCreateQuoteBranchNames() throws {
         let s = state()
         #expect(try GitActions.switchBranch(to: "release/1.0").commandLine(for: s) == "git switch release/1.0")
-        #expect(try GitActions.switchBranch(to: "it's").commandLine(for: s) == "git switch 'it'\\''s'")
+        #expect(try GitActions.switchBranch(to: "a$b").commandLine(for: s) == "git switch 'a$b'")
+        #expect(throws: GitAction.CommandError.invalidName(.quoteOrBackslash)) {
+            try GitActions.switchBranch(to: "it's").commandLine(for: s)
+        }
         #expect(try GitActions.createBranch(named: "new branch").commandLine(for: s) == "git switch -c 'new branch'")
     }
 

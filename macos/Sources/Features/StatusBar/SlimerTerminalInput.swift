@@ -4,39 +4,44 @@ import GhosttyKit
 /// Inserts command text into a terminal surface the way a `text:` keybind does.
 ///
 /// Per `docs/slimer/CONVENTIONS.md`, UI actions never run commands in a hidden
-/// subprocess: the command is typed into the user's shell where they can see it,
-/// and Enter is only sent after an explicit click and only when the shell is idle.
+/// subprocess: the command is typed into the user's shell where they can see it.
+/// Enter is only sent after an explicit "Run" click and only when the shell sits
+/// at an empty primary prompt (`SurfaceView.slimerIdlePrompt`). Nothing is ever
+/// sent to clear the user's input line (line-kill keys differ between shells
+/// and keymaps; leftover text would be executed).
 enum SlimerTerminalInput {
     enum InputError: Error, Equatable {
         case empty
-        /// C0/C1 controls, DEL, U+2028/U+2029 or bidi controls in the command text.
+        /// Characters rejected by `SlimerUnsafeText`.
         case containsControlCharacters
+        /// The surface is gone or Ghostty rejected the action.
+        case surfaceUnavailable
     }
 
-    /// What to send around the command text.
-    struct Plan: Equatable {
-        /// Send Ctrl-U first to clear whatever is typed at the prompt.
-        var clearLine: Bool
-        /// Send Enter after the command.
-        var pressEnter: Bool
+    /// What to do with a requested insertion.
+    enum Decision: Equatable {
+        /// Type the text, then Enter if `pressEnter`.
+        case type(pressEnter: Bool)
+        /// The prompt is not idle and empty; typing would mix with whatever is
+        /// there. Ask the user before typing (never with Enter).
+        case needsConfirmation
+        /// Running was requested but the prompt is not idle and empty.
+        case refuseRun
     }
 
     /// Decide how to insert a command.
     ///
     /// - Parameters:
-    ///   - runRequested: the user clicked the explicit "Run" button (as opposed
-    ///     to "Insert").
-    ///   - hasForegroundProcess: the surface is running something other than an
-    ///     idle shell prompt (`SurfaceView.needsConfirmQuit`).
-    ///
-    /// With a foreground process the text is only typed: no Ctrl-U (it would go to
-    /// that program) and never Enter. At an idle prompt the line is cleared first,
-    /// and Enter is sent only for an explicit run request.
-    static func plan(runRequested: Bool, hasForegroundProcess: Bool) -> Plan {
-        if hasForegroundProcess {
-            return Plan(clearLine: false, pressEnter: false)
+    ///   - runRequested: the user clicked "Run" (as opposed to "Insert").
+    ///   - idlePrompt: `SurfaceView.slimerIdlePrompt` at the time of the click.
+    ///   - confirmedWhileBusy: the user explicitly chose "Insert Anyway" after
+    ///     being told the prompt is not idle and empty.
+    static func decide(runRequested: Bool, idlePrompt: Bool, confirmedWhileBusy: Bool) -> Decision {
+        if idlePrompt {
+            return .type(pressEnter: runRequested)
         }
-        return Plan(clearLine: true, pressEnter: runRequested)
+        if runRequested { return .refuseRun }
+        return confirmedWhileBusy ? .type(pressEnter: false) : .needsConfirmation
     }
 
     /// Escape `text` for the parameter of a `text:` binding action.
@@ -49,45 +54,48 @@ enum SlimerTerminalInput {
         text.replacingOccurrences(of: "\\", with: "\\\\")
     }
 
-    /// The full binding action string for `command` under `plan`, for example
-    /// `text:\x15git pull --ff-only\r`. Throws if the command is empty or contains
+    /// The full binding action string for `command`, for example
+    /// `text:git pull --ff-only\r`. Throws if the command is empty or contains
     /// characters that must never be typed into a terminal (rejected, not stripped).
-    static func bindingAction(command: String, plan: Plan) throws -> String {
+    static func bindingAction(command: String, pressEnter: Bool) throws -> String {
         try validate(command)
-        var action = "text:"
-        if plan.clearLine { action += "\\x15" }
-        action += escapeForTextAction(command)
-        if plan.pressEnter { action += "\\r" }
+        var action = "text:" + escapeForTextAction(command)
+        if pressEnter { action += "\\r" }
         return action
     }
 
     static func validate(_ command: String) throws {
         guard !command.isEmpty else { throw InputError.empty }
-        for scalar in command.unicodeScalars where isForbidden(scalar) {
-            throw InputError.containsControlCharacters
-        }
+        guard SlimerUnsafeText.isSafe(command) else { throw InputError.containsControlCharacters }
     }
 
-    /// Type `command` into `surfaceView`. Returns `false` when nothing was sent.
+    /// Type `command` into `surfaceView` per `decide`. Returns the decision that
+    /// was applied; `.type` means the text was sent.
     @MainActor
-    @discardableResult
-    static func insert(_ command: String, into surfaceView: Ghostty.SurfaceView, run: Bool) -> Bool {
-        guard let surface = surfaceView.surface else { return false }
-        let plan = plan(runRequested: run, hasForegroundProcess: surfaceView.needsConfirmQuit)
-        guard let action = try? bindingAction(command: command, plan: plan) else { return false }
-        return ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8)))
-    }
-
-    private static func isForbidden(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x00...0x1F, 0x7F, 0x80...0x9F:
-            return true
-        case 0x2028, 0x2029:
-            return true
-        case 0x202A...0x202E, 0x2066...0x2069, 0x200E, 0x200F, 0x061C:
-            return true
-        default:
-            return false
+    static func insert(
+        _ command: String,
+        into surfaceView: Ghostty.SurfaceView,
+        run: Bool,
+        confirmedWhileBusy: Bool
+    ) -> Result<Decision, InputError> {
+        let decision = decide(
+            runRequested: run,
+            idlePrompt: surfaceView.slimerIdlePrompt,
+            confirmedWhileBusy: confirmedWhileBusy
+        )
+        guard case .type(let pressEnter) = decision else { return .success(decision) }
+        let action: String
+        do {
+            action = try bindingAction(command: command, pressEnter: pressEnter)
+        } catch let error as InputError {
+            return .failure(error)
+        } catch {
+            return .failure(.containsControlCharacters)
         }
+        guard let surface = surfaceView.surface,
+              ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) else {
+            return .failure(.surfaceUnavailable)
+        }
+        return .success(decision)
     }
 }
