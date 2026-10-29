@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:slimer:autocomplete-spec",
+  "title": "Slimer autocomplete spec",
+  "description": "Data-only completion spec for one CLI, converted from a Fig completion spec by tools/autocomplete-specs/convert.mjs. The document root is a Subcommand. Functions never appear: generator scripts are argv data that the engine may run only in its opt-in `scripted` tier.",
+  "$ref": "#/$defs/Subcommand",
+  "$defs": {
+    "SafeText": {
+      "description": "Free text with no C0/C1 controls, DEL, U+2028/2029 or bidi overrides/isolates. Descriptions are capped at 200 code points by the converter.",
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]*$"
+    },
+    "SafeName": {
+      "description": "Candidate text that may be inserted into the terminal: non-empty, trimmed, no unsafe characters.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069](?:[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]*[^\\s\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069])?$"
+    },
+    "NameList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/SafeName" }
+    },
+    "ScriptString": {
+      "description": "One argv element of a generator script. Newlines and tabs are legitimate inside shell lines; only NUL is forbidden.",
+      "type": "string",
+      "maxLength": 8192,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "Template": {
+      "type": "string",
+      "enum": ["filepaths", "folders", "history", "help"]
+    },
+    "TemplateList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Template" }
+    },
+    "Icon": {
+      "description": "A short emoji or a fig:// icon URI.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^(?:fig://[^\\s\\u0000-\\u001f\\u007f-\\u009f]+|(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\p{Regional_Indicator}|\\u200d|\\ufe0f|[0-9#*]\\ufe0f?\\u20e3)+)$"
+    },
+    "DataValue": {
+      "description": "JSON data with no functions: used for generator trigger and cache objects copied verbatim from the spec.",
+      "anyOf": [
+        { "type": "string", "maxLength": 200 },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "array", "items": { "$ref": "#/$defs/DataValue" }, "maxItems": 64 },
+        {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "$ref": "#/$defs/DataValue" },
+          "maxProperties": 32
+        }
+      ]
+    },
+    "Suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/$defs/NameList" },
+        "description": { "$ref": "#/$defs/SafeText" },
+        "icon": { "$ref": "#/$defs/Icon" },
+        "priority": { "type": "number" },
+        "isDangerous": { "const": true },
+        "hidden": { "const": true }
+      }
+    },
+    "Generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hasPostProcess", "hasCustom"],
+      "properties": {
+        "script": {
+          "description": "argv to run in the opt-in scripted tier. A legacy string script `s` is stored as [\"bash\", \"-c\", s]. `null` means the spec computed the script with a function, which was dropped.",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/ScriptString" } }
+          ]
+        },
+        "splitOn": { "$ref": "#/$defs/ScriptString" },
+        "template": { "$ref": "#/$defs/TemplateList" },
+        "trigger": {
+          "oneOf": [
+            { "$ref": "#/$defs/SafeName" },
+            {
+              "type": "object",
+              "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+              "additionalProperties": { "$ref": "#/$defs/DataValue" }
+            }
+          ]
+        },
+        "hasPostProcess": { "type": "boolean" },
+        "hasCustom": { "type": "boolean" },
+        "cache": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "$ref": "#/$defs/DataValue" }
+        }
+      }
+    },
+    "Arg": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/SafeText" },
+        "description": { "$ref": "#/$defs/SafeText" },
+        "isOptional": { "const": true },
+        "isVariadic": { "const": true },
+        "isCommand": { "const": true },
+        "isScript": { "const": true },
+        "isDangerous": { "const": true },
+        "template": { "$ref": "#/$defs/TemplateList" },
+        "suggestions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Suggestion" } },
+        "generators": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Generator" } }
+      }
+    },
+    "Option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/$defs/NameList" },
+        "description": { "$ref": "#/$defs/SafeText" },
+        "args": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Arg" } },
+        "isRequired": { "const": true },
+        "isRepeatable": {
+          "description": "true for unlimited repeats, or the maximum number of repeats.",
+          "oneOf": [{ "const": true }, { "type": "integer", "minimum": 1 }]
+        },
+        "isPersistent": { "const": true },
+        "isDangerous": { "const": true },
+        "exclusiveOn": { "$ref": "#/$defs/NameList" },
+        "dependsOn": { "$ref": "#/$defs/NameList" },
+        "requiresSeparator": {
+          "description": "true means `=`; a string names the separator.",
+          "oneOf": [{ "const": true }, { "$ref": "#/$defs/SafeName" }]
+        },
+        "hidden": { "const": true },
+        "priority": { "type": "number" }
+      }
+    },
+    "Subcommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/$defs/NameList" },
+        "description": { "$ref": "#/$defs/SafeText" },
+        "hidden": { "const": true },
+        "isDangerous": { "const": true },
+        "requiresSubcommand": { "const": true },
+        "priority": { "type": "number" },
+        "loadSpec": {
+          "description": "Key of another spec file (relative to specs/, without .json) whose subcommands/options/args apply at this node.",
+          "$ref": "#/$defs/SafeName"
+        },
+        "subcommands": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Subcommand" } },
+        "options": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Option" } },
+        "args": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Arg" } }
+      }
+    },
+    "Index": {
+      "description": "specs/index.json: what the converter produced.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceCommit", "generatedAt", "count", "aliases", "skipped", "failed"],
+      "properties": {
+        "sourceCommit": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 128 }] },
+        "generatedAt": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$" },
+        "count": { "type": "integer", "minimum": 0 },
+        "aliases": {
+          "description": "alias command name -> primary spec key (a top-level file name without .json).",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/SafeName" },
+          "additionalProperties": { "type": "string", "pattern": "^[a-z0-9._-]+$" }
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "reason"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "error"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "error": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

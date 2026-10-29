@@ -1,0 +1,14 @@
+PLACEHOLDER: replace this file's entire contents with the verbatim LICENSE file
+from the withfig/autocomplete checkout that specs/ was generated from.
+
+Do not paraphrase or retype it. From the checkout used for the conversion:
+
+    cp <checkout>/LICENSE src/autocomplete/data/LICENSE-withfig
+
+The commit sha recorded in specs/index.json (`sourceCommit`) must be the same
+checkout. withfig/autocomplete is MIT licensed; the MIT license requires the
+copyright notice and permission notice to accompany the redistributed data,
+which is why this file ships next to specs/ and is referenced from the
+application's about/credits screen.
+
+See tools/autocomplete-specs/README.md for the regeneration procedure.
