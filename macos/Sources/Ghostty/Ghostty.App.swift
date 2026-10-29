@@ -1670,6 +1670,7 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
+                SlimerCommandFinished.post(surfaceView: surfaceView, exitCode: v.exit_code, duration: v.duration) // slimer: status bar
 
                 // Determine if we even care about command finish notifications
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
