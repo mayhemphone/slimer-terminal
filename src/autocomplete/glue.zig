@@ -76,10 +76,10 @@ fn nowUnix() i64 {
 }
 
 /// Record the command line that is about to run (OSC 133 C).
-pub fn recordCommand(state: *const ac.State, cwd: []const u8) void {
-    if (!state.active or state.truncated or state.buffer.len == 0) return;
+pub fn recordCommand(line: []const u8, cwd: []const u8) void {
+    if (line.len == 0) return;
     const e = engine() orelse return;
-    e.record(state.buffer, cwd, nowUnix());
+    e.record(line, cwd, nowUnix());
 }
 
 /// Display width in cells of `bytes`, for anchoring the popup.

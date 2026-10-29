@@ -14,6 +14,14 @@
 //! - `k`: zle keymap name (`emacs`, `viins`, `vicmd`, ...). Letters,
 //!   digits, `_` and `-` only, at most `max_keymap_bytes`.
 //! - `t`: `1` if the shell truncated the buffer before encoding it.
+//! - `n`: (Slimer 6C) the per-surface secret the terminal handed the shell
+//!   in `SLIMER_AUTOCOMPLETE_TOKEN`, lowercase hex, at most
+//!   `max_nonce_bytes`. Optional for the parser; the core drops reports
+//!   whose secret doesn't match.
+//! - `p`: (Slimer 6C) the shell's process group id, decimal. Optional;
+//!   0 when absent.
+//! - `d`: (Slimer 6C) `1` when the shell left the line editor (zle
+//!   `line-finish`): the core forgets the buffer. Optional, default `0`.
 //! - `b`: the buffer, percent-encoded. The shell encodes `%`, `;`, every
 //!   C0 control (0x00-0x1F) and DEL (0x7F) as `%XX` with uppercase hex.
 //!   Everything else, including raw UTF-8, passes through. `b` must be
@@ -60,29 +68,59 @@ pub const max_keymap_bytes = 16;
 /// The only protocol version this parser accepts.
 pub const version = 1;
 
+/// The longest secret (`n=`) accepted.
+pub const max_nonce_bytes = 64;
+
 /// A parsed OSC 7704 report.
 ///
-/// The slices point into the parser's buffer and are only valid until
-/// the next call to the parser. Copy anything you want to keep.
+/// The fields are stored as offsets into `data`, the parser's capture
+/// buffer, to keep `osc.Command` small. The slices returned by the
+/// accessors are only valid until the next call to the parser. Copy
+/// anything you want to keep.
 pub const Command = struct {
     /// No C ABI representation; libghostty-vt only identifies the command.
     pub const C = void;
 
-    /// Always `autocomplete_buffer.version`.
-    version: u8,
+    /// The body, with the payload decoded in place.
+    data: []const u8,
 
     /// Cursor position as a character index. This may exceed the
     /// decoded buffer length when `truncated` is set, so consumers clamp.
     cursor: u32,
 
-    /// The zle keymap name, validated to `[A-Za-z0-9_-]{1,16}`.
-    keymap: []const u8,
+    /// The shell's process group (`p=`), 0 if absent.
+    pgid: u32 = 0,
+
+    buffer_off: u16 = 0,
+    buffer_len: u16 = 0,
+    keymap_off: u16 = 0,
+    keymap_len: u8 = 0,
+    nonce_off: u16 = 0,
+    nonce_len: u8 = 0,
+
+    /// Always `autocomplete_buffer.version`.
+    version: u8,
 
     /// The shell truncated the buffer before encoding it.
     truncated: bool,
 
+    /// The shell left the line editor (`d=1`).
+    deactivate: bool = false,
+
     /// The command line, already percent-decoded. Untrusted data.
-    buffer: []const u8,
+    pub fn buffer(self: *const Command) []const u8 {
+        return self.data[self.buffer_off..][0..self.buffer_len];
+    }
+
+    /// The zle keymap name, validated to `[A-Za-z0-9_-]{1,16}`.
+    pub fn keymap(self: *const Command) []const u8 {
+        return self.data[self.keymap_off..][0..self.keymap_len];
+    }
+
+    /// The reported secret (`n=`), hex. Empty if absent.
+    pub fn nonce(self: *const Command) []const u8 {
+        return self.data[self.nonce_off..][0..self.nonce_len];
+    }
 };
 
 /// Parse OSC 7704. The body is everything after `7704;`.
@@ -120,6 +158,7 @@ const Error = error{
     InvalidKeymap,
     InvalidTruncated,
     InvalidEncoding,
+    InvalidNonce,
     TooLong,
 };
 
@@ -128,9 +167,12 @@ const Error = error{
 fn parseBody(data: []u8) Error!Command {
     var ver: ?u8 = null;
     var cursor: ?u32 = null;
-    var keymap: ?[]const u8 = null;
+    var keymap: ?[]u8 = null;
     var truncated: ?bool = null;
     var buffer: ?[]u8 = null;
+    var nonce: ?[]u8 = null;
+    var pgid: ?u32 = null;
+    var deactivate: ?bool = null;
 
     var rest: []u8 = data;
     while (rest.len > 0) {
@@ -170,6 +212,22 @@ fn parseBody(data: []u8) Error!Command {
                 true
             else
                 return error.InvalidTruncated;
+        } else if (std.mem.eql(u8, key, "n")) {
+            if (nonce != null) return error.DuplicateField;
+            if (value.len == 0 or value.len > max_nonce_bytes) return error.InvalidNonce;
+            for (value) |c| if (!std.ascii.isHex(c)) return error.InvalidNonce;
+            nonce = value;
+        } else if (std.mem.eql(u8, key, "p")) {
+            if (pgid != null) return error.DuplicateField;
+            pgid = parseNumber(value) orelse return error.InvalidNumber;
+        } else if (std.mem.eql(u8, key, "d")) {
+            if (deactivate != null) return error.DuplicateField;
+            deactivate = if (std.mem.eql(u8, value, "0"))
+                false
+            else if (std.mem.eql(u8, value, "1"))
+                true
+            else
+                return error.InvalidTruncated;
         }
         // Unknown keys are skipped for forward compatibility.
     }
@@ -177,13 +235,28 @@ fn parseBody(data: []u8) Error!Command {
     const buf = buffer orelse return error.MissingField;
     if (buf.len > max_buffer_bytes) return error.TooLong;
 
+    const km = keymap orelse return error.MissingField;
+    const nc = nonce orelse data[0..0];
     return .{
+        .data = data,
         .version = ver orelse return error.MissingField,
         .cursor = cursor orelse return error.MissingField,
-        .keymap = keymap orelse return error.MissingField,
+        .keymap_off = offsetIn(data, km),
+        .keymap_len = @intCast(km.len),
         .truncated = truncated orelse return error.MissingField,
-        .buffer = buf,
+        .buffer_off = offsetIn(data, buf),
+        .buffer_len = @intCast(buf.len),
+        .nonce_off = offsetIn(data, nc),
+        .nonce_len = @intCast(nc.len),
+        .pgid = pgid orelse 0,
+        .deactivate = deactivate orelse false,
     };
+}
+
+/// Offset of `sub` inside `data`. The body is at most `max_body_bytes`
+/// (checked before parsing), so it fits in a u16.
+fn offsetIn(data: []const u8, sub: []const u8) u16 {
+    return @intCast(@intFromPtr(sub.ptr) - @intFromPtr(data.ptr));
 }
 
 /// Parse a non-empty string of ASCII digits into a u32. Anything else,
@@ -240,9 +313,58 @@ test "OSC 7704: happy path" {
     const cmd = p.end(0x07).?.autocomplete_buffer;
     try testing.expectEqual(@as(u8, 1), cmd.version);
     try testing.expectEqual(@as(u32, 7), cmd.cursor);
-    try testing.expectEqualStrings("emacs", cmd.keymap);
+    try testing.expectEqualStrings("emacs", cmd.keymap());
     try testing.expect(!cmd.truncated);
-    try testing.expectEqualStrings("git sta", cmd.buffer);
+    try testing.expectEqualStrings("git sta", cmd.buffer());
+}
+
+test "OSC 7704: secret, process group and deactivate fields" {
+    const testing = std.testing;
+
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice("7704;v=1;n=0123456789abcdef0123456789abcdef;p=4242;d=1;c=0;k=emacs;t=0;b=");
+        const cmd = p.end(0x07).?.autocomplete_buffer;
+        try testing.expectEqualStrings("0123456789abcdef0123456789abcdef", cmd.nonce());
+        try testing.expectEqual(@as(u32, 4242), cmd.pgid);
+        try testing.expect(cmd.deactivate);
+    }
+
+    // Absent: empty secret, pgid 0, not a deactivate.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice("7704;v=1;c=0;k=emacs;t=0;b=x");
+        const cmd = p.end(0x07).?.autocomplete_buffer;
+        try testing.expectEqualStrings("", cmd.nonce());
+        try testing.expectEqual(@as(u32, 0), cmd.pgid);
+        try testing.expect(!cmd.deactivate);
+    }
+
+    const bad = [_][]const u8{
+        "7704;v=1;n=xyz;c=0;k=emacs;t=0;b=",
+        "7704;v=1;n=;c=0;k=emacs;t=0;b=",
+        "7704;v=1;n=ab;n=ab;c=0;k=emacs;t=0;b=",
+        "7704;v=1;p=-1;c=0;k=emacs;t=0;b=",
+        "7704;v=1;d=2;c=0;k=emacs;t=0;b=",
+    };
+    for (bad) |body| {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice(body);
+        try testing.expect(p.end(0x07) == null);
+    }
+}
+
+test "OSC 7704: capture is capped at the body limit from the start" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+    p.nextSlice("7704;");
+    const cap = &p.capture.?;
+    try testing.expect(cap.max_bytes <= max_body_bytes + 1);
 }
 
 test "OSC 7704: ST terminator and vicmd keymap" {
@@ -254,8 +376,8 @@ test "OSC 7704: ST terminator and vicmd keymap" {
     p.nextSlice("7704;v=1;c=0;k=vicmd;t=0;b=");
     const cmd = p.end('\x1b').?.autocomplete_buffer;
     try testing.expectEqual(@as(u32, 0), cmd.cursor);
-    try testing.expectEqualStrings("vicmd", cmd.keymap);
-    try testing.expectEqualStrings("", cmd.buffer);
+    try testing.expectEqualStrings("vicmd", cmd.keymap());
+    try testing.expectEqualStrings("", cmd.buffer());
 }
 
 test "OSC 7704: truncated flag" {
@@ -268,7 +390,7 @@ test "OSC 7704: truncated flag" {
     const cmd = p.end(0x07).?.autocomplete_buffer;
     try testing.expect(cmd.truncated);
     try testing.expectEqual(@as(u32, 4096), cmd.cursor);
-    try testing.expectEqualStrings("abc", cmd.buffer);
+    try testing.expectEqualStrings("abc", cmd.buffer());
 }
 
 test "OSC 7704: encoded ; and % round trip" {
@@ -280,7 +402,7 @@ test "OSC 7704: encoded ; and % round trip" {
     // `echo 100%; ls` with the control bytes BEL and ESC embedded.
     p.nextSlice("7704;v=1;c=3;k=emacs;t=0;b=echo%20100%25%3B%20ls%07%1Bé");
     const cmd = p.end(0x07).?.autocomplete_buffer;
-    try testing.expectEqualStrings("echo 100%; ls\x07\x1bé", cmd.buffer);
+    try testing.expectEqualStrings("echo 100%; ls\x07\x1bé", cmd.buffer());
 }
 
 test "OSC 7704: lowercase hex and a raw semicolon in the payload" {
@@ -293,7 +415,7 @@ test "OSC 7704: lowercase hex and a raw semicolon in the payload" {
     // consumes the rest of the body, one is kept as data, not a field.
     p.nextSlice("7704;v=1;c=1;k=emacs;t=0;b=a%3bb;c=9");
     const cmd = p.end(0x07).?.autocomplete_buffer;
-    try testing.expectEqualStrings("a;b;c=9", cmd.buffer);
+    try testing.expectEqualStrings("a;b;c=9", cmd.buffer());
     try testing.expectEqual(@as(u32, 1), cmd.cursor);
 }
 
@@ -367,7 +489,7 @@ test "OSC 7704: unknown keys are skipped" {
 
     p.nextSlice("7704;v=1;x=future;c=2;k=emacs;t=0;b=ok");
     const cmd = p.end(0x07).?.autocomplete_buffer;
-    try testing.expectEqualStrings("ok", cmd.buffer);
+    try testing.expectEqualStrings("ok", cmd.buffer());
 }
 
 test "OSC 7704: oversized payload" {
@@ -395,7 +517,7 @@ test "OSC 7704: oversized payload" {
         @memset(big, 'a');
         p.nextSlice(big);
         const cmd = p.end(0x07).?.autocomplete_buffer;
-        try testing.expectEqual(max_buffer_bytes, cmd.buffer.len);
+        try testing.expectEqual(max_buffer_bytes, cmd.buffer().len);
     }
 
     // Body over the wire cap is rejected even if it would decode small.
@@ -426,7 +548,7 @@ test "OSC 7704: larger than the fixed parser buffer still parses" {
     @memset(big, 'z');
     p.nextSlice(big);
     const cmd = p.end(0x07).?.autocomplete_buffer;
-    try testing.expectEqual(big.len, cmd.buffer.len);
+    try testing.expectEqual(big.len, cmd.buffer().len);
 }
 
 test "OSC 7704: without an allocator, sequences past the fixed buffer are dropped" {

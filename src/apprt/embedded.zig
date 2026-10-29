@@ -1931,9 +1931,11 @@ pub const CAPI = struct {
     /// memory valid until the next update or dismiss on this surface.
     /// Call on the main thread only.
     export fn ghostty_surface_autocomplete_buffer(
-        surface: *Surface,
-        out: *AutocompleteBuffer,
+        surface_: ?*Surface,
+        out_: ?*AutocompleteBuffer,
     ) bool {
+        const surface = surface_ orelse return false;
+        const out = out_ orelse return false;
         const state = &surface.core_surface.autocomplete;
         out.* = .{
             .buffer = state.buffer.ptr,
@@ -1945,23 +1947,80 @@ pub const CAPI = struct {
         return state.active;
     }
 
-    /// slimer: send accepted completion text to the shell widget. The
-    /// text is validated and dropped (with a warning) if it contains
-    /// control characters, DEL, invalid UTF-8, C1 controls, U+2028/2029,
-    /// bidi overrides, or exceeds 4096 bytes. Never runs anything.
+    /// slimer: run the suggestion engine on the stored command line and
+    /// fill `out` with up to 8 ranked items. Strings point at
+    /// surface-owned memory valid until the next query on this surface.
+    /// Returns true if there is at least one item. Main thread only.
+    export fn ghostty_surface_autocomplete_query(
+        surface_: ?*Surface,
+        out_: ?*@import("../autocomplete/main.zig").CResult,
+    ) bool {
+        const surface = surface_ orelse return false;
+        const out = out_ orelse return false;
+        return surface.core_surface.autocompleteQuery(out);
+    }
+
+    /// slimer: send accepted completion text to the shell widget,
+    /// replacing the current token. Returns false and sends nothing
+    /// unless `generation` is the live one, the shell is at prompt input
+    /// and in the foreground, and the text is safe (see
+    /// `Surface.autocompleteAccept`). Never runs anything.
     export fn ghostty_surface_autocomplete_accept(
-        surface: *Surface,
-        ptr: [*]const u8,
+        surface_: ?*Surface,
+        generation: u64,
+        ptr_: ?[*]const u8,
         len: usize,
-    ) void {
-        surface.core_surface.autocompleteAccept(ptr[0..len]) catch |err| {
+    ) bool {
+        return autocompleteAccept(surface_, generation, ptr_, len, .token);
+    }
+
+    /// slimer: like ghostty_surface_autocomplete_accept but replaces the
+    /// whole line (history suggestions). The widget only applies it when
+    /// the cursor is at the end and the line is a prefix of the text.
+    export fn ghostty_surface_autocomplete_accept_line(
+        surface_: ?*Surface,
+        generation: u64,
+        ptr_: ?[*]const u8,
+        len: usize,
+    ) bool {
+        return autocompleteAccept(surface_, generation, ptr_, len, .line);
+    }
+
+    fn autocompleteAccept(
+        surface_: ?*Surface,
+        generation: u64,
+        ptr_: ?[*]const u8,
+        len: usize,
+        mode: @import("../autocomplete/main.zig").AcceptMode,
+    ) bool {
+        const surface = surface_ orelse return false;
+        const ptr = ptr_ orelse return false;
+        return surface.core_surface.autocompleteAccept(generation, ptr[0..len], mode) catch |err| {
             log.warn("autocomplete accept failed err={}", .{err});
+            return false;
         };
     }
 
     /// slimer: clear the stored buffer and bump its generation.
-    export fn ghostty_surface_autocomplete_dismiss(surface: *Surface) void {
+    export fn ghostty_surface_autocomplete_dismiss(surface_: ?*Surface) void {
+        const surface = surface_ orelse return;
         surface.core_surface.autocompleteDismiss();
+    }
+
+    /// slimer: where autocomplete history lives. `data_dir` holds
+    /// history.log (created 0600); `zsh_history` overrides the one-time
+    /// import source (default ~/.zsh_history). Call once at startup,
+    /// before the first query. Either may be null.
+    export fn ghostty_autocomplete_set_paths(
+        data_dir: ?[*]const u8,
+        data_dir_len: usize,
+        zsh_history: ?[*]const u8,
+        zsh_history_len: usize,
+    ) void {
+        @import("../autocomplete/main.zig").glue.configure(
+            if (data_dir) |p| p[0..data_dir_len] else "",
+            if (zsh_history) |p| p[0..zsh_history_len] else "",
+        );
     }
 
     /// Same as ghostty_surface_read_text but reads from the user selection,

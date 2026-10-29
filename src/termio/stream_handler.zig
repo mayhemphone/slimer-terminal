@@ -94,6 +94,10 @@ pub const StreamHandler = struct {
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
 
+    /// slimer: OSC 7704 gate (secret, prompt state, rate limit). The
+    /// surface sets the secret before the IO thread starts.
+    autocomplete_gate: autocomplete.Gate = .{},
+
     pub const Stream = terminal.Stream(StreamHandler);
 
     /// True if we have tmux control mode built in.
@@ -703,14 +707,17 @@ pub const StreamHandler = struct {
             },
 
             .alt_screen_legacy => {
+                if (enabled) self.autocompleteDeactivate(); // slimer
                 try self.terminal.switchScreenMode(.@"47", enabled);
             },
 
             .alt_screen => {
+                if (enabled) self.autocompleteDeactivate(); // slimer
                 try self.terminal.switchScreenMode(.@"1047", enabled);
             },
 
             .alt_screen_save_cursor_clear_enter => {
+                if (enabled) self.autocompleteDeactivate(); // slimer
                 try self.terminal.switchScreenMode(.@"1049", enabled);
             },
 
@@ -1485,6 +1492,8 @@ pub const StreamHandler = struct {
         switch (cmd.action) {
             .end_input_start_output => {
                 self.surfaceMessageWriter(.start_command);
+                // slimer: the surface clears its state on start_command.
+                self.autocomplete_gate.live = false;
             },
 
             .end_command => {
@@ -1497,15 +1506,19 @@ pub const StreamHandler = struct {
                 };
 
                 self.surfaceMessageWriter(.{ .stop_command = code });
+                self.autocompleteDeactivate(); // slimer
             },
+
+            // slimer: a new prompt (133 A) ends any live command line.
+            .fresh_line_new_prompt,
+            .new_command,
+            .prompt_start,
+            => self.autocompleteDeactivate(),
 
             // Handled by Terminal, no special handling by us
             .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .fresh_line_new_prompt,
-            .new_command,
-            .prompt_start,
             => {},
         }
 
@@ -1954,25 +1967,65 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 
-    /// slimer: forward an OSC 7704 autocomplete buffer report to the
-    /// surface, which applies the gate (shell integration seen, prompt
-    /// input state, rate limit). The parser's slices are borrowed, so
-    /// the payload is copied here and freed by the surface.
+    /// slimer: gate an OSC 7704 autocomplete buffer report and forward
+    /// it to the surface. Runs on the IO thread with the terminal locked,
+    /// in stream order, so the prompt-input check sees the state the
+    /// report was written in. The report must carry the surface's secret,
+    /// the terminal must be at prompt input on the primary screen with
+    /// shell integration seen, and the rate limit must hold. The parser's
+    /// slices are borrowed, so the buffer is copied once here and the
+    /// surface takes ownership of the copy.
     fn autocompleteBuffer(
         self: *StreamHandler,
         cmd: terminal.osc.Command.AutocompleteBuffer,
     ) void {
+        const gate = &self.autocomplete_gate;
+        if (cmd.deactivate) {
+            // zle line-finish: the line may be about to run. The surface
+            // keeps it until 133 C records it to history.
+            const token = gate.token orelse return;
+            if (!token.matches(cmd.nonce()) or !gate.live) return;
+            gate.live = false;
+            self.surfaceMessageWriter(.{
+                .autocomplete_buffer = autocomplete.Update.deactivation(self.alloc, .line_finish),
+            });
+            return;
+        }
+
+        const t = self.terminal;
+        const verdict = gate.check(cmd.nonce(), .{
+            .primary_screen = t.screens.active_key == .primary,
+            .shell_integration_seen = t.screens.active.semantic_prompt.seen,
+            .at_input = t.screens.active.cursor.semantic_content == .input,
+        }, .now(global.io(), .awake));
+        if (verdict != .accept) {
+            log.debug("autocomplete: dropping buffer report reason={t}", .{verdict});
+            return;
+        }
+
         const update = autocomplete.Update.init(
             self.alloc,
-            cmd.buffer,
+            cmd.buffer(),
             cmd.cursor,
-            cmd.keymap,
+            cmd.keymap(),
             cmd.truncated,
+            cmd.pgid,
         ) catch |err| {
             log.warn("autocomplete: failed to copy buffer report err={}", .{err});
             return;
         };
+        gate.live = true;
         self.surfaceMessageWriter(.{ .autocomplete_buffer = update });
+    }
+
+    /// slimer: tell the surface to forget its autocomplete buffer, if a
+    /// report was forwarded since the last time.
+    fn autocompleteDeactivate(self: *StreamHandler) void {
+        if (!self.autocomplete_gate.live) return;
+        self.autocomplete_gate.live = false;
+        self.surfaceMessageWriter(.{
+            .autocomplete_buffer = autocomplete.Update.deactivation(self.alloc, .reset),
+        });
     }
 };
 

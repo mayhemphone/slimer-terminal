@@ -3057,7 +3057,7 @@ keybind: Keybinds = .{},
 ///
 ///   * `autocomplete` - (Slimer) Make the shell report its command line to
 ///     the terminal (OSC 7704) and accept completions from the autocomplete
-///     popup (CSI 7705 ~). Off by default; turned on by `autocomplete = true`.
+///     popup (CSI 7705 ~). Turned on by `autocomplete = true` (Slimer's default).
 ///     zsh only for now.
 ///
 /// SSH features work independently and can be combined for optimal experience:
@@ -3075,8 +3075,30 @@ keybind: Keybinds = .{},
 /// untrusted data: it is length-capped, only accepted while the shell is
 /// at a prompt, rate limited, and never executed.
 ///
-/// Default: `false`.
-autocomplete: bool = false,
+/// Slimer ships this on by default (upstream-style opt-in features are
+/// off by default; this is a deliberate fork default). Set it to `false`
+/// to turn off the popup and the shell reports entirely.
+///
+/// Default: `true`.
+autocomplete: bool = true,
+
+// slimer
+/// The most suggestions the autocomplete popup shows, 1 to 8. Values
+/// outside that range are clamped.
+///
+/// Default: `8`.
+@"autocomplete-max-items": u8 = 8,
+
+// slimer
+/// What Enter does while the autocomplete popup is visible.
+///
+///   * `accept` - Insert the selected suggestion. The command is NOT run;
+///     press Enter again to run it.
+///   * `passthrough` - Enter goes to the shell as usual (runs the command
+///     line as typed) and the popup closes.
+///
+/// Default: `accept`.
+@"autocomplete-enter": AutocompleteEnter = .accept,
 
 /// Custom entries into the command palette.
 ///
@@ -10977,16 +10999,37 @@ test "clone preserves conditional set" {
     try testing.expect(clone1._conditional_set.contains(.theme));
 }
 
+/// slimer: see `autocomplete-enter`.
+pub const AutocompleteEnter = enum {
+    accept,
+    passthrough,
+};
+
 // slimer
 test "autocomplete implies the autocomplete shell integration feature" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // Slimer ships autocomplete on by default.
     {
         var cfg = try Config.default(alloc);
         defer cfg.deinit();
         try cfg.finalize();
+        try testing.expect(cfg.autocomplete);
+        try testing.expect(cfg.@"shell-integration-features".autocomplete);
+        try testing.expectEqual(@as(u8, 8), cfg.@"autocomplete-max-items");
+        try testing.expectEqual(AutocompleteEnter.accept, cfg.@"autocomplete-enter");
+    }
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{ "--autocomplete=false", "--autocomplete-enter=passthrough", "--autocomplete-max-items=4" } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
         try testing.expect(!cfg.@"shell-integration-features".autocomplete);
+        try testing.expectEqual(AutocompleteEnter.passthrough, cfg.@"autocomplete-enter");
+        try testing.expectEqual(@as(u8, 4), cfg.@"autocomplete-max-items");
     }
 
     {

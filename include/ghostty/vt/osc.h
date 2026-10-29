@@ -160,6 +160,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Slimer: an autocomplete buffer report (OSC 7704), which the shell
    * integration sends with its live command line. The OSC parser only
    * identifies this command; its contents are consumed by the terminal.
+   * This value is a fork addition and is NOT stable: it may change when
+   * upstream adds command types.
    */
   GHOSTTY_OSC_COMMAND_AUTOCOMPLETE_BUFFER = 29,
   GHOSTTY_OSC_COMMAND_TYPE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,

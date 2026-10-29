@@ -1038,7 +1038,9 @@ test "autocomplete engine: query latency with warm caches" {
     }
     const elapsed = start.durationTo(.now(io, .awake));
     const per_query_us = @divTrunc(elapsed.nanoseconds, iterations * std.time.ns_per_us);
-    std.debug.print("autocomplete bench: {d} queries, {d} us/query\n", .{ iterations, per_query_us });
+    // Printed only in release runs (`zig test -OReleaseFast ... --test-filter latency`);
+    // the build runner treats test stderr as a failure.
+    if (@import("builtin").mode != .debug) std.debug.print("autocomplete bench: {d} queries, {d} us/query\n", .{ iterations, per_query_us });
     // Loose bound that holds in Debug; ReleaseFast numbers are reported
     // in docs/slimer/AUTOCOMPLETE.md.
     try testing.expect(elapsed.nanoseconds < 2 * std.time.ns_per_s);

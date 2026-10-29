@@ -667,6 +667,12 @@ pub fn init(
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.
     {
+        // slimer: per-surface autocomplete secret (see autocomplete/main.zig).
+        const autocomplete_token: ?autocompletepkg.Token = if (config.@"shell-integration-features".autocomplete)
+            .random(global.io())
+        else
+            null;
+
         // Exec.init takes ownership of the env even if it fails, so the
         // errdefer for it must not reach past the call.
         const env = termio_env: {
@@ -685,6 +691,10 @@ pub fn init(
                 "GHOSTTY_SURFACE_ID",
                 std.mem.print(&buf, "0x{x:0>16}", .{self.id}) catch unreachable,
             );
+
+            // slimer: the autocomplete secret the shell must echo in
+            // every OSC 7704 report. The zsh integration unsets it.
+            if (autocomplete_token) |*t| try env.put(autocompletepkg.token_env, &t.hex);
 
             break :termio_env env;
         };
@@ -724,6 +734,7 @@ pub fn init(
             .renderer_mailbox = render_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
         });
+        self.io.terminal_stream.handler.autocomplete_gate.token = autocomplete_token; // slimer
     }
     // Outside the block, IO has now taken ownership of our temporary state
     // so we can just defer this and not the subcomponents.
@@ -1200,8 +1211,9 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .start_command => {
             self.command_timer = .now(global.io(), .awake);
 
-            // slimer: the command line was submitted, so any popup
-            // built from it is stale. Clear and tell the apprt.
+            // slimer: the command line was submitted: record it to the
+            // autocomplete history, then clear any popup built from it.
+            self.autocompleteRecord();
             self.autocompleteClear();
         },
 
@@ -1252,43 +1264,20 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
     }
 }
 
-/// slimer: handle an OSC 7704 autocomplete buffer report.
-///
-/// The gate: accept only if (1) shell integration has been seen on the
-/// active screen, (2) the terminal is in the prompt-input state, meaning
-/// after OSC 133 B and before OSC 133 C, and (3) the rate limit holds.
-/// Upstream tracks (1) as `Screen.semantic_prompt.seen`, flipped the
-/// first time any OSC 133 prompt mark is applied, and (2) as
-/// `Screen.cursor.semantic_content`, which OSC 133 B sets to `.input`
-/// and OSC 133 C / D set to `.output`. The alternate screen never
-/// qualifies. Dropped reports are logged at debug level and do nothing.
+/// slimer: handle an OSC 7704 autocomplete buffer report. The IO thread
+/// already applied the gate (secret, prompt-input state, rate limit; see
+/// `StreamHandler.autocompleteBuffer`). We take ownership of the buffer.
 fn autocompleteBuffer(self: *Surface, update: autocompletepkg.Update) void {
-    defer update.deinit();
-
-    const at_input: bool = at_input: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
-        const t = &self.io.terminal;
-        if (t.screens.active_key != .primary) break :at_input false;
-        const screen = t.screens.active;
-        break :at_input screen.semantic_prompt.seen and
-            screen.cursor.semantic_content == .input;
-    };
-    if (!at_input) {
-        log.debug("autocomplete: dropping buffer report outside prompt input", .{});
+    if (update.deactivate) |kind| {
+        update.deinit();
+        switch (kind) {
+            .line_finish => self.autocompleteStash(),
+            .reset => self.autocompleteClear(),
+        }
         return;
     }
 
-    if (!self.autocomplete.admit(.now(global.io(), .awake))) {
-        log.debug("autocomplete: dropping buffer report, rate limited", .{});
-        return;
-    }
-
-    self.autocomplete.set(self.alloc, update) catch |err| {
-        log.warn("autocomplete: failed to store buffer err={}", .{err});
-        return;
-    };
-
+    self.autocomplete.take(self.alloc, update);
     _ = self.rt_app.performAction(
         .{ .surface = self },
         .autocomplete_update,
@@ -1298,10 +1287,63 @@ fn autocompleteBuffer(self: *Surface, update: autocompletepkg.Update) void {
     };
 }
 
+/// slimer: copy the terminal's pwd into `buf`. Empty if unknown or too long.
+fn autocompletePwd(self: *Surface, buf: []u8) []const u8 {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    const p = self.io.terminal.getPwd() orelse return "";
+    if (p.len > buf.len) return "";
+    @memcpy(buf[0..p.len], p);
+    return buf[0..p.len];
+}
+
+/// slimer: record the submitted command line to autocomplete history:
+/// the line stashed on Enter / zle line-finish, else the live buffer.
+fn autocompleteRecord(self: *Surface) void {
+    const state = &self.autocomplete;
+    const pending = state.takePending();
+    defer self.alloc.free(pending);
+    const line: []const u8 = if (pending.len > 0)
+        pending
+    else if (state.active and !state.truncated)
+        state.buffer
+    else
+        return;
+    var buf: [4096]u8 = undefined;
+    autocompletepkg.glue.recordCommand(line, self.autocompletePwd(&buf));
+}
+
+/// slimer: the line was submitted or interrupted (Enter, ^C, ^D, ^Z, zle
+/// line-finish). End the live state now, keeping the line for history,
+/// and tell the apprt so the popup hides.
+fn autocompleteStash(self: *Surface) void {
+    if (!self.autocomplete.active) return;
+    self.autocomplete.stash(self.alloc);
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .autocomplete_update,
+        .{ .generation = self.autocomplete.generation },
+    ) catch |err| {
+        log.warn("apprt failed to report autocomplete update err={}", .{err});
+    };
+}
+
+/// slimer: run the suggestion engine on the stored buffer. Strings in
+/// `out` are owned by the surface until the next query.
+pub fn autocompleteQuery(self: *Surface, out: *autocompletepkg.CResult) bool {
+    var buf: [4096]u8 = undefined;
+    const cwd = self.autocompletePwd(&buf);
+    return autocompletepkg.glue.query(&self.autocomplete, self.alloc, cwd, out);
+}
+
 /// slimer: forget the autocomplete buffer and notify the apprt if there
 /// was one. Called when the command line is submitted.
 fn autocompleteClear(self: *Surface) void {
-    if (!self.autocomplete.active) return;
+    if (!self.autocomplete.active) {
+        // Drop a stashed line that never ran (^C, then a new prompt).
+        self.alloc.free(self.autocomplete.takePending());
+        return;
+    }
     self.autocomplete.clear(self.alloc);
     _ = self.rt_app.performAction(
         .{ .surface = self },
@@ -1312,26 +1354,59 @@ fn autocompleteClear(self: *Surface) void {
     };
 }
 
-/// slimer: send accepted completion text to the shell. The text is
-/// validated (see `autocompletepkg.isSafeAcceptText`) and rejected, not
-/// stripped, if unsafe. On success `CSI 7705 ~`, the percent-encoded
-/// text, and BEL are written to the pty through the same queue keyboard
-/// input uses, so readonly mode and the IO thread ordering apply. The
-/// shell widget bound to that sequence replaces the current token; this
-/// never sends a newline or runs anything.
-pub fn autocompleteAccept(self: *Surface, text: []const u8) !void {
+/// slimer: send accepted completion text to the shell. Returns false
+/// (and sends nothing) unless all of these hold:
+///
+/// - the stored state is live and `generation` is the one the popup was
+///   built from (so a popup can't outlive its command line);
+/// - the terminal is still at prompt input on the primary screen with
+///   shell integration seen;
+/// - the pty's foreground process group is the shell that reported the
+///   buffer (`p=`), so nothing reaches vim, a password prompt, fzf or an
+///   `edit-command-line` editor;
+/// - the text passes `autocompletepkg.isSafeAcceptText` (rejected, not
+///   stripped).
+///
+/// On success `CSI 7705 ~` (token) or `CSI 7706 ~` (whole line), the
+/// hex-encoded text, and BEL are written to the pty through the same
+/// queue keyboard input uses, so readonly mode and the IO thread
+/// ordering apply. This never sends a newline or runs anything.
+pub fn autocompleteAccept(
+    self: *Surface,
+    generation: u64,
+    text: []const u8,
+    mode: autocompletepkg.AcceptMode,
+) !bool {
+    const state = &self.autocomplete;
+    if (!state.active or state.generation != generation) return false;
     if (!autocompletepkg.isSafeAcceptText(text)) {
         log.warn("autocomplete: rejecting unsafe accept text len={d}", .{text.len});
-        return error.InvalidAutocompleteText;
+        return false;
+    }
+
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        const t = &self.io.terminal;
+        if (t.screens.active_key != .primary) return false;
+        const screen = t.screens.active;
+        if (!screen.semantic_prompt.seen or screen.cursor.semantic_content != .input) return false;
+    }
+
+    const fg = self.getProcessInfo(.foreground_pid) orelse return false;
+    if (state.pgid == 0 or fg != state.pgid) {
+        log.debug("autocomplete: accept refused, foreground pgid={d} shell={d}", .{ fg, state.pgid });
+        return false;
     }
 
     var buf: [autocompletepkg.acceptSequenceCapacity(autocompletepkg.max_accept_bytes)]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
-    try autocompletepkg.writeAcceptSequence(&writer, text);
+    try autocompletepkg.writeAcceptSequence(&writer, text, mode);
     self.queueIo(try termio.Message.writeReq(
         self.alloc,
         writer.buffered(),
     ), .unlocked);
+    return true;
 }
 
 /// slimer: the app dismissed the popup. Clears the stored buffer and
@@ -3049,6 +3124,10 @@ pub fn keyCallback(
             self.close();
             return .closed;
         }
+
+        // slimer: Enter, ^C, ^D and ^Z end the edited line. Forget it now
+        // so an autocomplete accept can't land in whatever runs next.
+        if (autocompletepkg.endsLine(write_req.slice())) self.autocompleteStash();
 
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = v },

@@ -962,6 +962,47 @@ typedef struct {
   uint64_t generation;
 } ghostty_autocomplete_buffer_s;
 
+// slimer: autocomplete.Engine.Kind
+typedef enum {
+  GHOSTTY_AUTOCOMPLETE_KIND_SUBCOMMAND = 0,
+  GHOSTTY_AUTOCOMPLETE_KIND_OPTION = 1,
+  GHOSTTY_AUTOCOMPLETE_KIND_ARG = 2,
+  GHOSTTY_AUTOCOMPLETE_KIND_PATH = 3,
+  GHOSTTY_AUTOCOMPLETE_KIND_HISTORY = 4,
+  GHOSTTY_AUTOCOMPLETE_KIND_GENERATOR = 5,
+} ghostty_autocomplete_kind_e;
+
+#define GHOSTTY_AUTOCOMPLETE_MAX_ITEMS 8
+
+// slimer: autocomplete.CItem. Strings are NOT NUL-terminated and point at
+// surface-owned memory valid until the next query on that surface.
+// `match_len` is the number of bytes at the start of `display` that
+// matched what was typed. `kind` is a ghostty_autocomplete_kind_e;
+// HISTORY items replace the whole line (accept_line), others the token.
+typedef struct {
+  const char* text;
+  uintptr_t text_len;
+  const char* display;
+  uintptr_t display_len;
+  const char* description;
+  uintptr_t description_len;
+  uint8_t kind;
+  bool dangerous;
+  uint32_t match_len;
+} ghostty_autocomplete_item_s;
+
+// slimer: autocomplete.CResult. `replace_start`/`replace_len` are in
+// characters (code points), `replace_cols` is the replaced token's width
+// in cells (for anchoring the popup at the token start).
+typedef struct {
+  ghostty_autocomplete_item_s items[GHOSTTY_AUTOCOMPLETE_MAX_ITEMS];
+  uintptr_t count;
+  uint32_t replace_start;
+  uint32_t replace_len;
+  uint32_t replace_cols;
+  uint64_t generation;
+} ghostty_autocomplete_result_s;
+
 // terminal.Scrollbar
 typedef struct {
   uint64_t total;
@@ -1269,10 +1310,21 @@ GHOSTTY_API bool ghostty_surface_has_selection(ghostty_surface_t);
 // slimer: autocomplete. See docs/slimer/AUTOCOMPLETE.md.
 GHOSTTY_API bool ghostty_surface_autocomplete_buffer(ghostty_surface_t,
                                                     ghostty_autocomplete_buffer_s*);
-GHOSTTY_API void ghostty_surface_autocomplete_accept(ghostty_surface_t,
+GHOSTTY_API bool ghostty_surface_autocomplete_query(ghostty_surface_t,
+                                                   ghostty_autocomplete_result_s*);
+GHOSTTY_API bool ghostty_surface_autocomplete_accept(ghostty_surface_t,
+                                                    uint64_t,
                                                     const char*,
                                                     uintptr_t);
+GHOSTTY_API bool ghostty_surface_autocomplete_accept_line(ghostty_surface_t,
+                                                         uint64_t,
+                                                         const char*,
+                                                         uintptr_t);
 GHOSTTY_API void ghostty_surface_autocomplete_dismiss(ghostty_surface_t);
+GHOSTTY_API void ghostty_autocomplete_set_paths(const char*,
+                                               uintptr_t,
+                                               const char*,
+                                               uintptr_t);
 GHOSTTY_API bool ghostty_surface_read_selection(ghostty_surface_t, ghostty_text_s*);
 GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
                                               ghostty_selection_s,

@@ -1041,7 +1041,14 @@ pub const Parser = struct {
             },
 
             .@"7704" => switch (c) {
-                ';' => self.captureTrailing(.allocating),
+                ';' => {
+                    self.captureTrailing(.allocating);
+                    // slimer: never buffer more than the 7704 body cap.
+                    if (self.capture) |*cap| cap.max_bytes = @min(
+                        cap.max_bytes,
+                        parsers.autocomplete_buffer.max_body_bytes + 1,
+                    );
+                },
                 else => self.unknownOrInvalid(c),
             },
 
