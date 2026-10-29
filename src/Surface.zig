@@ -668,8 +668,9 @@ pub fn init(
     // be scoped here to be valid.
     {
         // slimer: per-surface autocomplete secret (see autocomplete/main.zig).
+        // Fails closed: no secure randomness, no token, no autocomplete.
         const autocomplete_token: ?autocompletepkg.Token = if (config.@"shell-integration-features".autocomplete)
-            .random(global.io())
+            autocompletepkg.Token.random(global.io())
         else
             null;
 
@@ -890,6 +891,7 @@ pub fn deinit(self: *Surface) void {
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
     self.alloc.destroy(self.renderer_state.mutex);
     self.config.deinit();
+    autocompletepkg.glue.cancel(self.id); // slimer
     self.autocomplete.deinit(self.alloc); // slimer
 
     log.info("surface closed id={x}", .{self.id});
@@ -1261,6 +1263,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         },
 
         .autocomplete_buffer => |update| self.autocompleteBuffer(update), // slimer
+        .autocomplete_result => |result| self.autocompleteResult(result), // slimer
     }
 }
 
@@ -1268,16 +1271,27 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 /// already applied the gate (secret, prompt-input state, rate limit; see
 /// `StreamHandler.autocompleteBuffer`). We take ownership of the buffer.
 fn autocompleteBuffer(self: *Surface, update: autocompletepkg.Update) void {
-    if (update.deactivate) |kind| {
-        update.deinit();
-        switch (kind) {
-            .line_finish => self.autocompleteStash(),
-            .reset => self.autocompleteClear(),
-        }
-        return;
-    }
+    if (update.deactivate) |kind| switch (kind) {
+        .line_finish => {
+            const was_active = self.autocomplete.active;
+            self.autocomplete.lineFinish(self.alloc, update);
+            if (was_active) self.autocompleteNotify();
+            return;
+        },
+        .reset => {
+            update.deinit();
+            self.autocompleteClear();
+            return;
+        },
+    };
 
-    self.autocomplete.take(self.alloc, update);
+    // Ignored while the line has ended (until the next line starts).
+    if (!self.autocomplete.accept(self.alloc, update)) return;
+    self.autocompleteNotify();
+}
+
+/// slimer: tell the apprt the autocomplete state or result changed.
+fn autocompleteNotify(self: *Surface) void {
     _ = self.rt_app.performAction(
         .{ .surface = self },
         .autocomplete_update,
@@ -1285,6 +1299,19 @@ fn autocompleteBuffer(self: *Surface, update: autocompletepkg.Update) void {
     ) catch |err| {
         log.warn("apprt failed to report autocomplete update err={}", .{err});
     };
+}
+
+/// slimer: the worker finished a query. Keep it only if it is for this
+/// surface's current generation, then notify the apprt, which reads it
+/// with ghostty_surface_autocomplete_query.
+fn autocompleteResult(self: *Surface, result: *autocompletepkg.OwnedResult) void {
+    const state = &self.autocomplete;
+    if (result.owner != self.id or !state.active or result.generation != state.generation) {
+        result.destroy();
+        return;
+    }
+    state.setResult(result);
+    self.autocompleteNotify();
 }
 
 /// slimer: copy the terminal's pwd into `buf`. Empty if unknown or too long.
@@ -1317,15 +1344,12 @@ fn autocompleteRecord(self: *Surface) void {
 /// line-finish). End the live state now, keeping the line for history,
 /// and tell the apprt so the popup hides.
 fn autocompleteStash(self: *Surface) void {
+    // Latch even if nothing is live: reports for this line that are still
+    // in flight must not bring the popup back.
+    self.autocomplete.line_ended = true;
     if (!self.autocomplete.active) return;
     self.autocomplete.stash(self.alloc);
-    _ = self.rt_app.performAction(
-        .{ .surface = self },
-        .autocomplete_update,
-        .{ .generation = self.autocomplete.generation },
-    ) catch |err| {
-        log.warn("apprt failed to report autocomplete update err={}", .{err});
-    };
+    self.autocompleteNotify();
 }
 
 /// slimer: run the suggestion engine on the stored buffer. Strings in
@@ -1333,7 +1357,7 @@ fn autocompleteStash(self: *Surface) void {
 pub fn autocompleteQuery(self: *Surface, out: *autocompletepkg.CResult) bool {
     var buf: [4096]u8 = undefined;
     const cwd = self.autocompletePwd(&buf);
-    return autocompletepkg.glue.query(&self.autocomplete, self.alloc, cwd, out);
+    return autocompletepkg.glue.query(&self.autocomplete, self.id, self.surfaceMailbox(), cwd, out);
 }
 
 /// slimer: forget the autocomplete buffer and notify the apprt if there
@@ -5190,6 +5214,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 );
                 return true;
             };
+            if (autocompletepkg.submitsLine(text)) self.autocompleteStash(); // slimer
             self.queueIo(try termio.Message.writeReq(
                 self.alloc,
                 text,
@@ -6493,6 +6518,9 @@ fn completeClipboardPaste(
 
         break :encode_opts opts;
     };
+
+    // slimer: unbracketed text with CR/LF submits the line.
+    if (!encode_opts.bracketed and autocompletepkg.submitsLine(data)) self.autocompleteStash();
 
     // Encode the data. In most cases this doesn't require any
     // copies, so we optimize for that case.

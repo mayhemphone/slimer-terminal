@@ -1489,11 +1489,11 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         cmd: Stream.Action.SemanticPrompt,
     ) !void {
+        self.autocompleteSemanticPrompt(cmd.action); // slimer
+
         switch (cmd.action) {
             .end_input_start_output => {
                 self.surfaceMessageWriter(.start_command);
-                // slimer: the surface clears its state on start_command.
-                self.autocomplete_gate.live = false;
             },
 
             .end_command => {
@@ -1506,19 +1506,15 @@ pub const StreamHandler = struct {
                 };
 
                 self.surfaceMessageWriter(.{ .stop_command = code });
-                self.autocompleteDeactivate(); // slimer
             },
-
-            // slimer: a new prompt (133 A) ends any live command line.
-            .fresh_line_new_prompt,
-            .new_command,
-            .prompt_start,
-            => self.autocompleteDeactivate(),
 
             // Handled by Terminal, no special handling by us
             .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
+            .fresh_line_new_prompt,
+            .new_command,
+            .prompt_start,
             => {},
         }
 
@@ -1981,19 +1977,26 @@ pub const StreamHandler = struct {
     ) void {
         const gate = &self.autocomplete_gate;
         if (cmd.deactivate) {
-            // zle line-finish: the line may be about to run. The surface
-            // keeps it until 133 C records it to history.
+            // zle line-finish (or the history hook): the line may be about
+            // to run. The surface keeps it until 133 C records it, using
+            // the shell's history verdict (`h=`) when there is one.
             const token = gate.token orelse return;
-            if (!token.matches(cmd.nonce()) or !gate.live) return;
-            gate.live = false;
-            self.surfaceMessageWriter(.{
-                .autocomplete_buffer = autocomplete.Update.deactivation(self.alloc, .line_finish),
-            });
+            if (!token.matches(cmd.nonce())) return;
+            const was_live = gate.live;
+            gate.markLineEnd();
+            if (!was_live and cmd.history == null) return;
+            var update = autocomplete.Update.deactivation(self.alloc, .line_finish);
+            update.history = cmd.history;
+            update.truncated = cmd.truncated;
+            if (cmd.history == true) {
+                update.buffer = self.alloc.dupe(u8, cmd.buffer()) catch return;
+            }
+            self.surfaceMessageWriter(.{ .autocomplete_buffer = update });
             return;
         }
 
         const t = self.terminal;
-        const verdict = gate.check(cmd.nonce(), .{
+        const verdict = gate.check(cmd.nonce(), cmd.line_init, .{
             .primary_screen = t.screens.active_key == .primary,
             .shell_integration_seen = t.screens.active.semantic_prompt.seen,
             .at_input = t.screens.active.cursor.semantic_content == .input,
@@ -2014,8 +2017,32 @@ pub const StreamHandler = struct {
             log.warn("autocomplete: failed to copy buffer report err={}", .{err});
             return;
         };
+        var forwarded = update;
+        forwarded.line_start = gate.takeFresh();
         gate.live = true;
-        self.surfaceMessageWriter(.{ .autocomplete_buffer = update });
+        self.surfaceMessageWriter(.{ .autocomplete_buffer = forwarded });
+    }
+
+    /// slimer: OSC 133 marks drive the autocomplete line lifecycle. A new
+    /// prompt (A) or input start (B) begins a line; A and D end any live
+    /// command line; C hands over to the surface's start_command.
+    fn autocompleteSemanticPrompt(
+        self: *StreamHandler,
+        action: @FieldType(Stream.Action.SemanticPrompt, "action"),
+    ) void {
+        switch (action) {
+            .fresh_line_new_prompt, .new_command, .prompt_start => {
+                self.autocompleteDeactivate();
+                self.autocomplete_gate.markLineStart();
+            },
+            .end_prompt_start_input, .end_prompt_start_input_terminate_eol => {
+                self.autocomplete_gate.markLineStart();
+            },
+            .end_command => self.autocompleteDeactivate(),
+            // The surface clears its state on start_command.
+            .end_input_start_output => self.autocomplete_gate.live = false,
+            .fresh_line => {},
+        }
     }
 
     /// slimer: tell the surface to forget its autocomplete buffer, if a

@@ -112,8 +112,25 @@ clearline
 zpty -w Z 'print -r MARK-$((6*7))'
 drain
 check "line was never executed before Enter" "$buf" 'MARK-42'
-check "line-finish deactivates" "$buf" $';d=1;'
+check "line-finish deactivates" "$buf" $';d=1;c=0;k=other;t=0;b=\a'
+# zsh -f has no HISTFILE: the history hook says "don't record" (h=0).
+check "no history file means h=0" "$buf" $';d=1;h=0;c=0;k=other;t=0;b=\a'
 refute "no stray execution" "$buf" 'command not found'
+
+# The first report of the next line (the empty prompt) carries i=1.
+check "line-init marks the first report" "$buf" $';i=1;c=0;k='$km$';t=0;b=\a'
+
+# With a history file, the full command line is sent for recording (h=1);
+# HISTORY_IGNORE matches are not (h=0).
+zpty -w Z "HISTFILE=${TMPDIR:-/tmp}/ac_hist.$$; HISTORY_IGNORE='print -r SECRET*'"
+drain
+zpty -w Z 'print -r H1'
+drain
+check "history hook sends the line" "$buf" $';d=1;h=1;c=0;k=other;t=0;b=print -r H1\a'
+zpty -w Z 'print -r SECRET-1'
+drain
+check "HISTORY_IGNORE means h=0" "$buf" $';d=1;h=0;c=0;k=other;t=0;b=\a'
+refute "ignored line not sent for history" "$buf" 'h=1;c=0;k=other;t=0;b=print -r SECRET'
 
 # No re-emit when nothing changed: the first redraw at the fresh prompt may
 # report the new (empty) state once; a second identical redraw must not.
@@ -124,6 +141,6 @@ drain
 refute "dedupe on redraw" "$buf" $'\e]7704'
 
 zpty -d Z
-rm -f $rc
+rm -f $rc ${TMPDIR:-/tmp}/ac_hist.$$
 print "pass=$pass fail=$fail"
 (( fail == 0 ))

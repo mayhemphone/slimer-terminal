@@ -3057,7 +3057,8 @@ keybind: Keybinds = .{},
 ///
 ///   * `autocomplete` - (Slimer) Make the shell report its command line to
 ///     the terminal (OSC 7704) and accept completions from the autocomplete
-///     popup (CSI 7705 ~). Turned on by `autocomplete = true` (Slimer's default).
+///     popup (CSI 7705 ~). On by default in Slimer; `no-autocomplete` here or
+///     `autocomplete = false` turns it off.
 ///     zsh only for now.
 ///
 /// SSH features work independently and can be combined for optimal experience:
@@ -3092,13 +3093,19 @@ autocomplete: bool = true,
 // slimer
 /// What Enter does while the autocomplete popup is visible.
 ///
-///   * `accept` - Insert the selected suggestion. The command is NOT run;
-///     press Enter again to run it.
-///   * `passthrough` - Enter goes to the shell as usual (runs the command
+///   * `navigated` - Enter runs the command as typed, unless you moved the
+///     selection in the popup (arrows, Ctrl-N/P, Shift-Tab) since the line
+///     last changed; then it inserts the selected suggestion without
+///     running it. Tab (or Right at the end of the line) inserts the top
+///     suggestion. This matches Warp.
+///   * `accept` - Enter always inserts the selected suggestion, or the top
+///     one if nothing is selected. The command is NOT run; press Enter
+///     again to run it.
+///   * `passthrough` - Enter always goes to the shell (runs the command
 ///     line as typed) and the popup closes.
 ///
-/// Default: `accept`.
-@"autocomplete-enter": AutocompleteEnter = .accept,
+/// Default: `navigated`.
+@"autocomplete-enter": AutocompleteEnter = .navigated,
 
 /// Custom entries into the command palette.
 ///
@@ -4917,7 +4924,11 @@ pub fn finalize(self: *Config) !void {
 
     // slimer: the autocomplete popup needs the shell to report its
     // command line, so the config key implies the shell feature.
-    if (self.autocomplete) self.@"shell-integration-features".autocomplete = true;
+    // Either switch turns it off: `autocomplete = false`, or an explicit
+    // `no-autocomplete` in shell-integration-features (the feature itself
+    // defaults on).
+    if (!self.autocomplete) self.@"shell-integration-features".autocomplete = false;
+    self.autocomplete = self.@"shell-integration-features".autocomplete;
 
     // The default for the working directory depends on the system.
     var wd: WorkingDirectory = self.@"working-directory" orelse if (probable_cli)
@@ -9033,7 +9044,7 @@ pub const ShellIntegrationFeatures = packed struct {
     @"ssh-env": bool = false,
     @"ssh-terminfo": bool = false,
     path: bool = true,
-    autocomplete: bool = false, // slimer: implied by `autocomplete = true`
+    autocomplete: bool = true, // slimer: off if `autocomplete = false`
 };
 
 /// See vt-xt-checksum-extension
@@ -11001,6 +11012,7 @@ test "clone preserves conditional set" {
 
 /// slimer: see `autocomplete-enter`.
 pub const AutocompleteEnter = enum {
+    navigated,
     accept,
     passthrough,
 };
@@ -11018,7 +11030,7 @@ test "autocomplete implies the autocomplete shell integration feature" {
         try testing.expect(cfg.autocomplete);
         try testing.expect(cfg.@"shell-integration-features".autocomplete);
         try testing.expectEqual(@as(u8, 8), cfg.@"autocomplete-max-items");
-        try testing.expectEqual(AutocompleteEnter.accept, cfg.@"autocomplete-enter");
+        try testing.expectEqual(AutocompleteEnter.navigated, cfg.@"autocomplete-enter");
     }
 
     {
@@ -11041,6 +11053,28 @@ test "autocomplete implies the autocomplete shell integration feature" {
         try testing.expect(cfg.@"shell-integration-features".autocomplete);
         // Other features keep their defaults.
         try testing.expect(cfg.@"shell-integration-features".cursor);
+    }
+
+    // An explicit `no-autocomplete` wins over `autocomplete = true`.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{ "--autocomplete=true", "--shell-integration-features=no-autocomplete" } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(!cfg.@"shell-integration-features".autocomplete);
+        try testing.expect(!cfg.autocomplete);
+    }
+
+    // Listing other features keeps it on.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{"--shell-integration-features=no-cursor"} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(cfg.@"shell-integration-features".autocomplete);
+        try testing.expect(cfg.autocomplete);
     }
 
     // The explicit feature still parses on its own (backwards compatible list).

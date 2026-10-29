@@ -38,6 +38,8 @@ pub const Engine = @import("Engine.zig");
 pub const Spec = @import("Spec.zig");
 pub const Tokenizer = @import("Tokenizer.zig");
 pub const History = @import("History.zig");
+pub const Worker = @import("Worker.zig").Worker;
+pub const OwnedResult = @import("Worker.zig").OwnedResult;
 
 /// Glue between the core surface and the shared engine. Only analyzed
 /// when referenced (it pulls in global state).
@@ -75,9 +77,11 @@ pub const Keymap = enum(u8) {
 pub const Token = struct {
     hex: [token_hex_len]u8,
 
-    pub fn random(io: std.Io) Token {
+    /// A fresh secret from the OS's secure random source, or null if
+    /// that isn't available (the caller then leaves autocomplete off).
+    pub fn random(io: std.Io) ?Token {
         var bytes: [token_hex_len / 2]u8 = undefined;
-        io.random(&bytes);
+        io.randomSecure(&bytes) catch return null;
         var t: Token = undefined;
         _ = std.fmt.bufPrint(&t.hex, "{x}", .{&bytes}) catch unreachable;
         return t;
@@ -108,7 +112,34 @@ pub const Gate = struct {
     /// prompt marks only post a deactivate when something is live.
     live: bool = false,
 
-    pub const Verdict = enum { accept, bad_token, not_at_input, rate_limited };
+    /// The shell left the line editor (`d=1`): refuse reports until the
+    /// next line starts (OSC 133 A/B, or a report with `i=1`).
+    ended: bool = false,
+
+    /// A line started and no report was forwarded since: the next
+    /// forwarded report is marked `line_start`.
+    fresh: bool = false,
+
+    pub const Verdict = enum { accept, bad_token, not_at_input, rate_limited, line_ended };
+
+    /// A new line is being edited (133 A/B, or `i=1` from zle line-init).
+    pub fn markLineStart(self: *Gate) void {
+        self.ended = false;
+        self.fresh = true;
+    }
+
+    /// The shell left the line editor (`d=1`).
+    pub fn markLineEnd(self: *Gate) void {
+        self.ended = true;
+        self.live = false;
+    }
+
+    /// Whether the report being forwarded is the first of its line.
+    pub fn takeFresh(self: *Gate) bool {
+        const f = self.fresh;
+        self.fresh = false;
+        return f;
+    }
 
     /// Terminal facts the caller reads under the terminal lock.
     pub const TerminalState = struct {
@@ -120,11 +151,14 @@ pub const Gate = struct {
     pub fn check(
         self: *Gate,
         nonce: []const u8,
+        line_init: bool,
         term: TerminalState,
         now: std.Io.Timestamp,
     ) Verdict {
         const token = &(self.token orelse return .bad_token);
         if (!token.matches(nonce)) return .bad_token;
+        if (line_init) self.markLineStart();
+        if (self.ended) return .line_ended;
         if (!term.primary_screen or !term.shell_integration_seen or !term.at_input)
             return .not_at_input;
         if (!self.admit(now)) return .rate_limited;
@@ -164,6 +198,16 @@ pub const Update = struct {
     pgid: u32,
     /// Set for an update that only ends the live state.
     deactivate: ?Deactivate = null,
+
+    /// The first report of a new line (see `Gate.fresh`). Clears the
+    /// surface's "line ended" latch and drops a stashed line that never ran.
+    line_start: bool = false,
+
+    /// For a `line_finish` deactivate: the shell's verdict on adding the
+    /// line to history (`h=`). `true`: `buffer` is the full command line
+    /// to record. `false`: record nothing (HISTORY_IGNORE, incognito).
+    /// null: the shell didn't say; record the last reported buffer.
+    history: ?bool = null,
 
     pub const Deactivate = enum {
         /// The shell left the line editor (zle `line-finish`, `d=1`): the
@@ -229,9 +273,18 @@ pub const State = struct {
     /// none. Never a truncated buffer.
     pending: []u8 = &.{},
 
-    /// Strings of the last query result, owned by the surface until the
-    /// next query (the engine's own scratch memory is shared).
-    query_arena: ?std.heap.ArenaAllocator = null,
+    /// The latest query result from the worker, owned. Only used while its
+    /// generation is the current one.
+    result: ?*OwnedResult = null,
+
+    /// The generation a query was last requested for, so repeated polls
+    /// for the same buffer don't queue more work.
+    requested: u64 = 0,
+
+    /// Set when the line was submitted or interrupted (Enter, ^C, ^D, ^Z,
+    /// text with CR/LF, zle line-finish). Reports are ignored until the
+    /// next line starts, so a late report can't revive a stale line.
+    line_ended: bool = false,
 
     /// True between a `take` and the next `clear`. The C API reports
     /// false when nothing is live so the app can hide its popup.
@@ -243,18 +296,46 @@ pub const State = struct {
     pub fn deinit(self: *State, alloc: Allocator) void {
         alloc.free(self.buffer);
         alloc.free(self.pending);
-        if (self.query_arena) |*a| a.deinit();
+        if (self.result) |r| r.destroy();
         self.* = .{};
     }
 
-    /// The arena for a new query result, reset from the previous one.
-    pub fn resetQueryArena(self: *State, alloc: Allocator) Allocator {
-        if (self.query_arena) |*a| {
-            _ = a.reset(.retain_capacity);
-        } else {
-            self.query_arena = .init(alloc);
+    /// Replace the stored result.
+    pub fn setResult(self: *State, r: *OwnedResult) void {
+        if (self.result) |old| old.destroy();
+        self.result = r;
+    }
+
+    /// Apply a non-deactivate update, honoring the "line ended" latch.
+    /// Returns false (and frees the update) if it was ignored.
+    pub fn accept(self: *State, alloc: Allocator, update: Update) bool {
+        if (update.line_start) {
+            self.line_ended = false;
+            // The stashed line never reached 133 C: it didn't run.
+            alloc.free(self.pending);
+            self.pending = &.{};
+        } else if (self.line_ended) {
+            update.deinit();
+            return false;
         }
-        return self.query_arena.?.allocator();
+        self.take(alloc, update);
+        return true;
+    }
+
+    /// Handle zle line-finish (`d=1`): end the live state, then apply the
+    /// shell's history verdict to the stashed line.
+    pub fn lineFinish(self: *State, alloc: Allocator, update: Update) void {
+        self.stash(alloc);
+        self.line_ended = true;
+        if (update.history) |record| {
+            alloc.free(self.pending);
+            self.pending = &.{};
+            if (record and !update.truncated and update.buffer.len > 0) {
+                self.pending = update.buffer;
+                return; // ownership moved
+            }
+        }
+        update.deinit();
     }
 
     /// Take ownership of `update`'s buffer and bump the generation. The
@@ -303,6 +384,8 @@ pub const State = struct {
     pub fn clear(self: *State, alloc: Allocator) void {
         alloc.free(self.pending);
         self.pending = &.{};
+        if (self.result) |r| r.destroy();
+        self.result = null;
         alloc.free(self.buffer);
         self.buffer = &.{};
         self.cursor = 0;
@@ -312,6 +395,38 @@ pub const State = struct {
         self.generation +%= 1;
     }
 };
+
+/// True if a command line starts PowerShell (`pwsh`, `powershell`, with
+/// or without `.exe` or a path), which loads the Slimer module from the
+/// user's profile and so needs the autocomplete secret.
+pub fn isPowerShell(command_line: []const u8) bool {
+    var words = std.mem.tokenizeAny(u8, command_line, " \t");
+    const first = words.next() orelse return false;
+    const slash = std.mem.lastIndexOfAny(u8, first, "/\\") orelse return isPowerShellName(first);
+    return isPowerShellName(first[slash + 1 ..]);
+}
+
+fn isPowerShellName(name: []const u8) bool {
+    const base = if (std.ascii.endsWithIgnoreCase(name, ".exe")) name[0 .. name.len - 4] else name;
+    return std.ascii.eqlIgnoreCase(base, "pwsh") or std.ascii.eqlIgnoreCase(base, "powershell");
+}
+
+test "autocomplete: PowerShell detection" {
+    const testing = std.testing;
+    try testing.expect(isPowerShell("pwsh"));
+    try testing.expect(isPowerShell("/usr/local/bin/pwsh -NoLogo"));
+    try testing.expect(isPowerShell("C:\\PowerShell\\7\\pwsh.exe"));
+    try testing.expect(isPowerShell("powershell.exe"));
+    try testing.expect(!isPowerShell("/bin/zsh"));
+    try testing.expect(!isPowerShell("bash -l"));
+    try testing.expect(!isPowerShell(""));
+}
+
+/// Returns true if text sent to the pty (typed text, a `text:` binding, a
+/// paste) contains CR or LF, which submits the line.
+pub fn submitsLine(text: []const u8) bool {
+    return std.mem.indexOfAny(u8, text, "\r\n") != null;
+}
 
 /// Returns true if the bytes a key press writes to the pty end or
 /// interrupt the line being edited: CR, LF, ^C, ^D or ^Z anywhere in the
@@ -452,6 +567,9 @@ pub const CResult = extern struct {
     replace_len: u32 = 0,
     replace_cols: u32 = 0,
     generation: u64 = 0,
+    /// No result yet for this generation: a query is running. Keep the
+    /// current popup as is and wait for the next update.
+    pending: bool = false,
 };
 
 test {
@@ -462,6 +580,7 @@ test {
     _ = @import("Fs.zig");
     _ = @import("Generators.zig");
     _ = @import("Rank.zig");
+    _ = @import("Worker.zig");
 }
 
 test "autocomplete: keymap names" {
@@ -545,35 +664,106 @@ test "autocomplete: gate token, prompt state and rate limit" {
     const t0: std.Io.Timestamp = .{ .nanoseconds = 0 };
 
     // No token configured: nothing is accepted.
-    try testing.expectEqual(Gate.Verdict.bad_token, gate.check("", at_input, t0));
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check("", false, at_input, t0));
 
-    gate.token = Token.random(testing.io);
+    gate.token = Token.random(testing.io).?;
     const good = gate.token.?.hex;
     var bad = good;
     bad[5] ^= 1;
-    try testing.expectEqual(Gate.Verdict.bad_token, gate.check(&bad, at_input, t0));
-    try testing.expectEqual(Gate.Verdict.bad_token, gate.check(good[0..31], at_input, t0));
-    try testing.expectEqual(Gate.Verdict.bad_token, gate.check("", at_input, t0));
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check(&bad, false, at_input, t0));
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check(good[0..31], false, at_input, t0));
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check("", false, at_input, t0));
 
-    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, .{ .primary_screen = false, .shell_integration_seen = true, .at_input = true }, t0));
-    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, .{ .primary_screen = true, .shell_integration_seen = false, .at_input = true }, t0));
-    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, .{ .primary_screen = true, .shell_integration_seen = true, .at_input = false }, t0));
+    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, false, .{ .primary_screen = false, .shell_integration_seen = true, .at_input = true }, t0));
+    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, false, .{ .primary_screen = true, .shell_integration_seen = false, .at_input = true }, t0));
+    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, false, .{ .primary_screen = true, .shell_integration_seen = true, .at_input = false }, t0));
 
     var i: usize = 0;
     while (i < rate_limit_per_second) : (i += 1) {
-        try testing.expectEqual(Gate.Verdict.accept, gate.check(&good, at_input, t0));
+        try testing.expectEqual(Gate.Verdict.accept, gate.check(&good, false, at_input, t0));
     }
     // The 201st in the same second is dropped, as is one 999ms later.
-    try testing.expectEqual(Gate.Verdict.rate_limited, gate.check(&good, at_input, t0));
+    try testing.expectEqual(Gate.Verdict.rate_limited, gate.check(&good, false, at_input, t0));
     try testing.expect(!gate.admit(.{ .nanoseconds = 999 * std.time.ns_per_ms }));
     // A new window opens after a second.
     try testing.expect(gate.admit(.{ .nanoseconds = 1000 * std.time.ns_per_ms }));
 }
 
+test "autocomplete: gate refuses reports after line end until a line starts" {
+    const testing = std.testing;
+    var gate: Gate = .{ .token = Token.random(testing.io).? };
+    const tok = gate.token.?.hex;
+    const at_input: Gate.TerminalState = .{ .primary_screen = true, .shell_integration_seen = true, .at_input = true };
+    const t0: std.Io.Timestamp = .{ .nanoseconds = 0 };
+
+    gate.markLineStart();
+    try testing.expectEqual(Gate.Verdict.accept, gate.check(&tok, false, at_input, t0));
+    try testing.expect(gate.takeFresh());
+    try testing.expectEqual(Gate.Verdict.accept, gate.check(&tok, false, at_input, t0));
+    try testing.expect(!gate.takeFresh());
+
+    gate.markLineEnd();
+    try testing.expectEqual(Gate.Verdict.line_ended, gate.check(&tok, false, at_input, t0));
+    // zle line-init (i=1) starts a new line.
+    try testing.expectEqual(Gate.Verdict.accept, gate.check(&tok, true, at_input, t0));
+    try testing.expect(gate.takeFresh());
+    gate.markLineEnd();
+    gate.markLineStart(); // 133 A/B
+    try testing.expectEqual(Gate.Verdict.accept, gate.check(&tok, false, at_input, t0));
+}
+
+test "autocomplete: state latch, line start and history verdicts" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var state: State = .{};
+    defer state.deinit(alloc);
+
+    try testing.expect(state.accept(alloc, try Update.init(alloc, "make t", 6, "emacs", false, 1)));
+    // Enter: stash and latch; later reports for the old line are ignored.
+    state.stash(alloc);
+    state.line_ended = true;
+    try testing.expectEqualStrings("make t", state.pending);
+    try testing.expect(!state.accept(alloc, try Update.init(alloc, "make te", 7, "emacs", false, 1)));
+    try testing.expect(!state.active);
+
+    // zle line-finish with the full multi-line command for history.
+    var fin = Update.deactivation(alloc, .line_finish);
+    fin.history = true;
+    fin.buffer = try alloc.dupe(u8, "make t \\\n  V=1");
+    state.lineFinish(alloc, fin);
+    try testing.expectEqualStrings("make t \\\n  V=1", state.pending);
+
+    // h=0 (HISTORY_IGNORE / incognito) drops it.
+    var no = Update.deactivation(alloc, .line_finish);
+    no.history = false;
+    state.lineFinish(alloc, no);
+    try testing.expectEqual(@as(usize, 0), state.pending.len);
+
+    // ^C then a new line: the stashed line is dropped at line start.
+    try testing.expect(!state.accept(alloc, try Update.init(alloc, "x", 1, "emacs", false, 1)));
+    state.line_ended = false;
+    try testing.expect(state.accept(alloc, try Update.init(alloc, "rm -rf", 6, "emacs", false, 1)));
+    state.stash(alloc);
+    state.line_ended = true;
+    var next = try Update.init(alloc, "l", 1, "emacs", false, 1);
+    next.line_start = true;
+    try testing.expect(state.accept(alloc, next));
+    try testing.expectEqual(@as(usize, 0), state.pending.len);
+    try testing.expect(!state.line_ended);
+    try testing.expectEqualStrings("l", state.buffer);
+}
+
+test "autocomplete: text that submits the line" {
+    const testing = std.testing;
+    try testing.expect(submitsLine("ls\n"));
+    try testing.expect(submitsLine("a\rb"));
+    try testing.expect(!submitsLine("ls -la"));
+}
+
 test "autocomplete: token is 128-bit lowercase hex and random" {
     const testing = std.testing;
-    const a = Token.random(testing.io);
-    const b = Token.random(testing.io);
+    const a = Token.random(testing.io).?;
+    const b = Token.random(testing.io).?;
     for (a.hex) |c| try testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
     try testing.expect(!std.mem.eql(u8, &a.hex, &b.hex));
     try testing.expect(a.matches(&a.hex));
