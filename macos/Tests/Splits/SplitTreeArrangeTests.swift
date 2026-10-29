@@ -321,6 +321,34 @@ struct SplitTreeArrangeTests {
         #expect(zoomed.arrangedRows().zoomed == nil)
     }
 
+    // MARK: - Focus decision
+
+    @Test func refocusOnlyWhenStructureChanges() {
+        let v = Self.views(6)
+        let tree = Self.mixed(v)
+        let focused = v[2]
+        let refocus = { (new: Tree) in
+            BaseTerminalController.arrangeRefocusTarget(from: tree, to: new, focused: focused)
+        }
+        // Ratio-only changes must not touch focus.
+        #expect(refocus(tree.equalized()) == nil)
+        #expect(refocus(tree.equalized(axis: .horizontal)) == nil)
+        #expect(refocus(tree.equalized(axis: .vertical)) == nil)
+        // Re-parenting changes refocus the focused pane.
+        #expect(refocus(tree.arrangedEvenGrid(aspectRatio: 1.6)) === focused)
+        #expect(refocus(tree.arrangedColumns()) === focused)
+        #expect(refocus(tree.arrangedRows()) === focused)
+        // Undo direction is symmetric.
+        let grid = tree.arrangedEvenGrid(aspectRatio: 1.6)
+        #expect(BaseTerminalController.arrangeRefocusTarget(from: grid, to: tree, focused: focused) === focused)
+        // Unzooming is structural; no focus or a foreign view means no refocus.
+        let leaf = tree.root?.node(view: v[0])
+        let zoomed = Tree(root: tree.root, zoomed: leaf)
+        #expect(BaseTerminalController.arrangeRefocusTarget(from: zoomed, to: tree, focused: focused) === focused)
+        #expect(BaseTerminalController.arrangeRefocusTarget(from: tree, to: grid, focused: nil) == nil)
+        #expect(BaseTerminalController.arrangeRefocusTarget(from: tree, to: grid, focused: MockView()) == nil)
+    }
+
     @Test func emptyAndSingleAreUnchanged() {
         let empty = Tree()
         #expect(empty.arrangedEvenGrid(aspectRatio: 1.6).isEmpty)

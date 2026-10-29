@@ -67,12 +67,48 @@ extension BaseTerminalController {
 
         guard newTree.root != surfaceTree.root || newTree.zoomed != surfaceTree.zoomed else { return }
 
+        applyArrangedTree(newTree, undoAction: arrangement == .equalizeAll ? "Equalize Splits" : "Arrange Panes")
+    }
+
+    /// The pane to refocus after swapping `old` for `new`, or nil to leave
+    /// focus alone. Only a structural change (SwiftUI re-parents the views, so
+    /// the focused view loses first responder) needs a refocus. A ratio-only
+    /// change must not touch focus: resigning and re-making the same first
+    /// responder leaves the surface unfocused (hollow cursor, focus-out sent to
+    /// the program, secure input dropped).
+    static func arrangeRefocusTarget<V: NSView & Codable & Identifiable>(
+        from old: SplitTree<V>,
+        to new: SplitTree<V>,
+        focused: V?
+    ) -> V? {
+        guard let focused, new.contains(where: { $0 === focused }) else { return nil }
+        return old.structuralIdentity == new.structuralIdentity ? nil : focused
+    }
+
+    /// Swap in `newTree` with its own undo/redo, like `replaceSurfaceTree`, but
+    /// refocusing only per `arrangeRefocusTarget` and never resigning first
+    /// (`moveFocus(to:from: nil)`), so the same surface is never on both sides.
+    private func applyArrangedTree(_ newTree: SplitTree<Ghostty.SurfaceView>, undoAction: String) {
+        let oldTree = surfaceTree
         let focused = focusedSurface
-        replaceSurfaceTree(
-            newTree,
-            moveFocusTo: focused,
-            moveFocusFrom: focused,
-            undoAction: arrangement == .equalizeAll ? "Equalize Splits" : "Arrange Panes")
+        surfaceTree = newTree
+        if let target = Self.arrangeRefocusTarget(from: oldTree, to: newTree, focused: focused) {
+            DispatchQueue.main.async { Ghostty.moveFocus(to: target) }
+        }
+
+        guard let undoManager else { return }
+        undoManager.setActionName(undoAction)
+        undoManager.registerUndo(withTarget: self, expiresAfter: undoExpiration) { target in
+            let current = target.focusedSurface
+            let redoTree = target.surfaceTree
+            target.surfaceTree = oldTree
+            if let view = Self.arrangeRefocusTarget(from: redoTree, to: oldTree, focused: current) {
+                DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+            }
+            undoManager.registerUndo(withTarget: target, expiresAfter: target.undoExpiration) { target in
+                target.applyArrangedTree(newTree, undoAction: undoAction)
+            }
+        }
     }
 
     /// Width / height of the area the split tree is drawn in.

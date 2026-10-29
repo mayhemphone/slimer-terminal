@@ -27,6 +27,7 @@
                 <outlet property="menuCopy" destination="Jqf-pv-Zcu" id="bKd-1C-oy9"/>
                 <outlet property="menuDecreaseFontSize" destination="kzb-SZ-dOA" id="Y1B-Vh-6Z2"/>
                 <outlet property="menuEqualizeSplits" destination="3gH-VD-vL9" id="SiZ-ce-FOF"/>
+                <outlet property="menuArrangeEqualizeAll" destination="sLA-pn-1eA" id="sLA-pn-1eO"/>
                 <outlet property="menuFind" destination="nwE-0w-30h" id="idg-Nc-apE"/>
                 <outlet property="menuFindNext" destination="XqU-X8-q32" id="vNh-AH-6gZ"/>
                 <outlet property="menuFindParent" destination="cE3-Bt-FcH" id="2dc-ok-hgH"/>

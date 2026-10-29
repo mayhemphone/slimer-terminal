@@ -6,7 +6,7 @@ has fewer than two panes.
 
 | Item | What it does | Shortcut |
 | --- | --- | --- |
-| Equalize All | Upstream Equalize Splits: every split gets a ratio by leaf count. | `equalize_splits` (default `cmd+ctrl+=`), shown on Resize Split ▸ Equalize Splits |
+| Equalize All | Upstream Equalize Splits: every split gets a ratio by leaf count. | `equalize_splits` (default `cmd+ctrl+=`); the displayed shortcut follows your keybind, like Resize Split ▸ Equalize Splits |
 | Equal Widths | Equalizes only side-by-side splits. Stacked splits keep their ratios. | none |
 | Equal Heights | Equalizes only stacked splits. Side-by-side splits keep their ratios. | none |
 | Even Grid | Rebuilds the tab into an even rows × columns grid. | `cmd+ctrl+G` |
@@ -42,16 +42,24 @@ tab has two or more panes.
   "Undo Equalize Splits"). This also makes upstream Equalize Splits (menu,
   keybind, divider double-click) undoable. In the drawer, split undo is
   dropped on tab switch (see DRAWER.md).
-- **Focus.** The focused pane stays focused.
+- **Focus.** The focused pane stays focused. Ratio-only changes (Equalize All,
+  Equal Widths, Equal Heights, and their undo/redo) never touch first
+  responder. Changes that re-parent views (Even Grid, Columns, Rows, unzoom,
+  and their undo/redo) refocus the focused pane without resigning it first.
 - **Zoom.** Even Grid, Columns and Rows unzoom a zoomed pane. Equal Widths and
   Equal Heights keep the zoom, like upstream Equalize.
 - **No-op.** An item that would not change the tree does nothing and adds no
   undo entry.
-- **Shortcuts.** Only Even Grid has a shortcut. `cmd+ctrl+G` is not a Ghostty
-  default keybind or a standard macOS shortcut. A Ghostty `keybind` on the
-  same keys wins over the menu. Bind the others in System Settings ▸ Keyboard
-  ▸ Keyboard Shortcuts ▸ App Shortcuts using the exact menu title (they are
-  not Ghostty actions, so a Ghostty `keybind` cannot target them).
+- **Shortcuts.** Only Even Grid has a shortcut, and it is fixed in
+  `MainMenu.xib`: `cmd+ctrl+G` is not a Ghostty config key, it is not a
+  Ghostty default keybind, and it is not a standard macOS shortcut. A Ghostty
+  `keybind` on the same keys wins over the menu (the terminal checks its
+  bindings first). The Arrange Panes items are not Ghostty actions, so a
+  Ghostty `keybind` cannot target them. To rebind or add shortcuts, use
+  System Settings ▸ Keyboard ▸ Keyboard Shortcuts ▸ App Shortcuts, click +,
+  pick the app, and type the exact menu title (`Even Grid`, `Equal Widths`,
+  `Equal Heights`, `Columns`, `Rows`). A shortcut set there replaces
+  `cmd+ctrl+G` for Even Grid.
 
 ## Code
 
@@ -66,6 +74,8 @@ Upstream edits (merge hotspots):
 
 - `MainMenu.xib`: the Arrange Panes submenu after Resize Split (ids `sLA-pn-*`).
   XIB files cannot keep a `// slimer:` marker.
+- `AppDelegate.swift`: an outlet `menuArrangeEqualizeAll` and one
+  `syncMenuShortcut` line so Equalize All shows the `equalize_splits` trigger.
 - `BaseTerminalController.swift`: `ghosttyDidEqualizeSplits` calls
   `arrangePanes(.equalizeAll)`; `validateMenuItem` asks
   `validateArrangePanesMenuItem` (this also disables Equalize Splits with one
