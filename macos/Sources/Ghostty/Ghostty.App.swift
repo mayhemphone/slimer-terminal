@@ -28,7 +28,7 @@ extension Ghostty {
         @Published private(set) var config: Config
 
         /// Preferred config file than the default ones
-        private var configPath: String?
+        private(set) var configPath: String? // slimer: readable so Settings writes the same file
         /// The ghostty app instance. We only have one of these for the entire app, although I guess
         /// in theory you can have multiple... I don't know why you would...
         @Published var app: ghostty_app_t? {
@@ -2107,6 +2107,7 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 surfaceView.initialSize = NSSize(width: Double(v.width), height: Double(v.height))
+                surfaceView.initialSize?.height += SlimerStatusBar.initialHeightExtra // slimer: keep window-height rows
 
             default:
                 assertionFailure()

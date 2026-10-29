@@ -1023,6 +1023,11 @@ class AppDelegate: NSObject,
         ghostty.openConfig()
     }
 
+    // slimer: Settings… (Cmd+,) opens the Settings window; "Open Config File" lives there.
+    @IBAction func openSettings(_ sender: Any?) {
+        SettingsWindowController.shared.show()
+    }
+
     @IBAction func reloadConfig(_ sender: Any?) {
         ghostty.reloadConfig()
     }

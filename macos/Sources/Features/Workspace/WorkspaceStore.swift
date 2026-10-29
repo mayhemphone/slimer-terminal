@@ -98,6 +98,16 @@ final class WorkspaceStore: ObservableObject {
         NSWorkspace.shared.open(fileURL)
     }
 
+    /// Whether edits are saved. While the file on disk is invalid they would stay in memory
+    /// only, so Settings disables editing.
+    var acceptsEdits: Bool { loadError == nil }
+
+    /// Apply an edit from Settings (add, change, delete, reorder). Same path as usage
+    /// updates: a newer file on disk is loaded first and the edit re-applied on top.
+    func edit(_ change: (inout WorkspaceDocument) -> Void) {
+        mutate(change)
+    }
+
     /// Count a use of a location (also counts a visit to its directory).
     func recordUse(location: WorkspaceLocation) {
         let date = now()

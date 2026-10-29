@@ -4,12 +4,16 @@ import SwiftUI
 /// The status bar's Claude button: click opens Claude Code in a new tab in the
 /// surface's directory, Option-click opens it in a split to the right, and the
 /// chevron menu offers continue/resume.
+///
+/// It holds the surface weakly and observes nothing, so it never re-renders on
+/// status changes. Installation is checked from `ClaudeLauncher`'s cache when the
+/// menu is built and re-validated on click.
 struct ClaudeButton: View {
-    @ObservedObject var model: SlimerStatusBarModel
+    weak var surfaceView: Ghostty.SurfaceView?
 
     var body: some View {
         Menu {
-            ClaudeMenuItems(model: model)
+            ClaudeMenuItems(surfaceView: surfaceView)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: "sparkles")
@@ -18,21 +22,25 @@ struct ClaudeButton: View {
             }
             .foregroundColor(.secondary)
         } primaryAction: {
-            guard let surfaceView = model.surfaceView else { return }
-            let placement: ClaudeLauncher.Placement = NSEvent.modifierFlags.contains(.option) ? .splitRight : .tab
+            guard let surfaceView else { return }
+            let preferred = ClaudeLauncher.defaultPlacement
+            let other: ClaudeLauncher.Placement = preferred == .tab ? .splitRight : .tab
+            let placement = NSEvent.modifierFlags.contains(.option) ? other : preferred
             ClaudeLauncher.launch(.new, placement: placement, from: surfaceView)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.visible)
         .fixedSize()
-        .help("Claude Code here (⌥-click: split right)")
+        .help(ClaudeLauncher.defaultPlacement == .tab
+              ? "Claude Code here (⌥-click: split right)"
+              : "Claude Code in a split (⌥-click: new tab)")
         .accessibilityLabel("Claude Code")
     }
 }
 
-/// Menu items shared by the button's menu.
+/// Menu items for the button's menu.
 struct ClaudeMenuItems: View {
-    @ObservedObject var model: SlimerStatusBarModel
+    weak var surfaceView: Ghostty.SurfaceView?
 
     var body: some View {
         if ClaudeLauncher.isInstalled {
@@ -49,7 +57,7 @@ struct ClaudeMenuItems: View {
     }
 
     private func launch(_ mode: ClaudeLauncher.Mode, _ placement: ClaudeLauncher.Placement) {
-        guard let surfaceView = model.surfaceView else { return }
+        guard let surfaceView else { return }
         ClaudeLauncher.launch(mode, placement: placement, from: surfaceView)
     }
 }

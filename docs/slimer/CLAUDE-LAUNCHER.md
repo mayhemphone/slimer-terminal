@@ -9,7 +9,9 @@ Code: `macos/Sources/Features/Claude/`, tests: `macos/Tests/Features/Claude/`.
 `~/.claude/local/claude`, then `<dir>/claude` for each absolute entry of the app's own
 `PATH`. The first executable regular file wins (symlinks are followed but the
 unresolved path is kept, so versioned installs keep working after updates). A
-found binary is cached for the app's lifetime; a miss is re-checked on the next use.
+found binary is cached until a launch finds the file gone (each launch re-checks it);
+a miss is cached for 30 s, so menus built from the cache cost no `stat` calls. A
+binary path containing `'`, `\` or control characters is never launched.
 
 ## Launching
 
@@ -27,7 +29,9 @@ Closing Claude closes its tab (Ghostty's normal `command` behavior).
 
 ## UI
 
-- **Status bar button:** click = new tab, Option-click = split right. The chevron
+- **Status bar button:** click = new tab, Option-click = split right (swapped when
+  Settings ▸ Claude sets the default open mode to "Split to the right"; stored in
+  `UserDefaults` as `SlimerClaudeDefaultPlacement`). The chevron
   menu offers Claude Here (New Tab), Claude Here (Split Right), Continue Last
   (`claude --continue`), Resume… (`claude --resume`). When Claude is not installed
   the menu shows a disabled "Claude Code Not Installed" item and "Install Claude

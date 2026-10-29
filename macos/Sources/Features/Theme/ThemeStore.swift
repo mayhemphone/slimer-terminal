@@ -141,6 +141,35 @@ final class ThemeStore: ObservableObject {
         didChange()
     }
 
+    /// Replaces a rule (matched by id). Ignored if the rule or its theme is unknown.
+    func update(rule: ThemeRule) {
+        guard theme(id: rule.themeId) != nil,
+              let idx = rules.firstIndex(where: { $0.id == rule.id }),
+              rules[idx] != rule else { return }
+        rules[idx] = rule
+        didChange()
+    }
+
+    /// Moves rules like `MutableCollection.move(fromOffsets:toOffset:)` (List reordering).
+    /// File order is the final tie-breaker between matching rules.
+    func moveRules(fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard !source.isEmpty, destination >= 0, destination <= rules.count,
+              source.allSatisfy({ rules.indices.contains($0) }) else { return }
+        let moving = source.map { rules[$0] }
+        var remaining = rules.enumerated().filter { !source.contains($0.offset) }.map(\.element)
+        let insertAt = destination - source.filter { $0 < destination }.count
+        remaining.insert(contentsOf: moving, at: insertAt)
+        guard remaining != rules else { return }
+        rules = remaining
+        didChange()
+    }
+
+    /// Whether in-app edits are saved (or, for an unparseable file, saved after moving it
+    /// aside). Settings disables editing otherwise.
+    var acceptsEdits: Bool {
+        persistence == .writable || persistence == .unparseable
+    }
+
     /// Replaces any existing `pathPrefix` rule for exactly this path, then adds the new one.
     /// Used by "Always use for this folder".
     func setPathRule(path: String, themeId: UUID, priority: Int = 0) {
