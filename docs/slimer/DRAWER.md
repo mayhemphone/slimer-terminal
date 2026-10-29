@@ -38,7 +38,8 @@ The drawer has two ways to hold more than one terminal:
   force a direction. Stacks are visible at the same time and share the
   drawer's width/height. Move between them with `goto_split:next` (default
   `cmd+]`) or the directional `goto_split:*` bindings; `equalize_splits`
-  evens them out.
+  evens them out. Window ▸ Arrange Panes (Even Grid, Columns, Rows, and
+  more) works on the selected drawer tab; see [PANES.md](PANES.md).
 - **Tabs.** Each tab is its own stack of splits, and only one tab is visible
   at a time. Tabs are for separate contexts (a repo, a server, a long-running
   log) that you switch between rather than watch together.

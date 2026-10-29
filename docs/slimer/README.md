@@ -28,6 +28,7 @@ Requires Zig 0.17, Xcode 26+ with the Metal Toolchain component (`xcodebuild -do
 | [CONVENTIONS.md](CONVENTIONS.md) | Fork rules: merge hygiene, security, speed |
 | [MANUAL-TEST.md](MANUAL-TEST.md) | Hands-on checklist for things only a person can verify |
 | [DRAWER.md](DRAWER.md) | Slide-out terminal, tabs, stacks, animation |
+| [PANES.md](PANES.md) | Window ▸ Arrange Panes: equalize, even grid, columns, rows |
 | [THEMES.md](THEMES.md) | Per-terminal and per-tab themes, rules |
 | [WORKSPACE.md](WORKSPACE.md) | Locations, saved commands, recent dirs, syncing |
 | [GIT.md](GIT.md) | Read-only git status service |

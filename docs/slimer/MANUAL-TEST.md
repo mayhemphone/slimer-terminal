@@ -25,6 +25,21 @@ The first global hotkey use asks for Accessibility permission. Grant it in Syste
 - [ ] `quick-terminal-animation = fade` and `none` behave as named.
 - [ ] Switching macOS between light and dark mode updates background tabs too, if your theme uses `light:...,dark:...`.
 
+## Arrange Panes
+
+Open a normal window and split it into 8 terminals of uneven sizes (mix Cmd+D and Cmd+Shift+D, drag a few dividers). Run something visible in each, e.g. `echo N; top`.
+
+- [ ] Window, Arrange Panes, Even Grid (or Cmd+Ctrl+G) in a wide window gives 2 rows x 4 columns, in the same left-to-right, top-to-bottom order. Row dividers line up across columns. Every shell is still running.
+- [ ] Cmd+Z restores the previous layout. Cmd+Shift+Z redoes it.
+- [ ] The focused terminal stays focused (typing goes to it) after each item.
+- [ ] Equal Widths evens only the column widths; row heights inside columns stay as they were. Equal Heights does the reverse.
+- [ ] Columns puts all 8 side by side; Rows stacks all 8. Both are undoable.
+- [ ] Equalize All matches Resize Split, Equalize Splits and Cmd+Ctrl+=, and is undoable.
+- [ ] Zoom a pane (Window, Zoom Split), then Even Grid: the zoom is cleared and the grid shows.
+- [ ] With a single pane, every Arrange Panes item (and Equalize Splits) is greyed out.
+- [ ] Command palette: "Arrange Panes: Even Grid" etc. appear only with 2+ panes and work.
+- [ ] In the drawer (right side, tall): 4 stacked panes, then Even Grid gives 2 rows x 2 columns; 8 gives 4 rows x 2 columns. Switch tabs and back: layout kept, other tab untouched.
+
 ## Status bar and git
 
 - [ ] Each terminal has a thin bar at the bottom with the current directory.
