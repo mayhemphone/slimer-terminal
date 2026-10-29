@@ -277,6 +277,14 @@ test "setup features" {
         try testing.expectEqualStrings("cursor:blink", env.get("GHOSTTY_SHELL_FEATURES").?);
     }
 
+    // slimer: autocomplete feature
+    {
+        var env = EnvMap.init(alloc);
+        defer env.deinit();
+        try setupFeatures(&env, .{ .cursor = true, .sudo = false, .title = false, .@"ssh-env" = false, .@"ssh-terminfo" = false, .path = false, .autocomplete = true }, true);
+        try testing.expectEqualStrings("autocomplete,cursor:blink", env.get("GHOSTTY_SHELL_FEATURES").?);
+    }
+
     // Test: steady cursor
     {
         var env = EnvMap.init(alloc);

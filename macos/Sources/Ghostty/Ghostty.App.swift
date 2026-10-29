@@ -789,6 +789,10 @@ extension Ghostty {
             case GHOSTTY_ACTION_COMMAND_FINISHED:
                 commandFinished(app, target: target, v: action.action.command_finished)
 
+            // slimer
+            case GHOSTTY_ACTION_AUTOCOMPLETE_UPDATE:
+                autocompleteUpdate(app, target: target, v: action.action.autocomplete_update)
+
             case GHOSTTY_ACTION_PRESENT_TERMINAL:
                 return presentTerminal(app, target: target)
 
@@ -1654,6 +1658,35 @@ extension Ghostty {
                     body: body,
                     requireFocus: requireFocus
                 )
+            }
+        }
+
+        // slimer: the core accepted a new shell command-line report (or
+        // cleared it). The popup reads the buffer back through
+        // ghostty_surface_autocomplete_buffer and compares generations.
+        private static func autocompleteUpdate(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_autocomplete_update_s
+        ) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("autocomplete update does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+                NotificationCenter.default.post(
+                    name: Ghostty.Notification.ghosttyAutocompleteDidUpdate,
+                    object: surfaceView,
+                    userInfo: [
+                        Ghostty.Notification.AutocompleteGenerationKey: v.generation
+                    ]
+                )
+
+            default:
+                assertionFailure()
             }
         }
 

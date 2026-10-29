@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// slimer: OSC 7704
+pub const autocomplete_buffer = @import("parsers/autocomplete_buffer.zig");
 pub const change_window_icon = @import("parsers/change_window_icon.zig");
 pub const hierarchical_context = @import("parsers/hierarchical_context.zig");
 pub const change_window_title = @import("parsers/change_window_title.zig");

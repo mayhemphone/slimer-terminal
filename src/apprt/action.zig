@@ -364,6 +364,11 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
+    /// slimer: the autocomplete buffer for the surface changed (or was
+    /// cleared). The apprt reads the buffer back with
+    /// ghostty_surface_autocomplete_buffer and compares generations.
+    autocomplete_update: AutocompleteUpdate,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +441,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+        autocomplete_update, // slimer
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -1068,6 +1074,19 @@ pub const SearchSelected = struct {
         return .{
             .selected = if (self.selected) |s| @intCast(s) else -1,
         };
+    }
+};
+
+/// slimer: sync with ghostty_action_autocomplete_update_s in ghostty.h
+pub const AutocompleteUpdate = struct {
+    generation: u64,
+
+    pub const C = extern struct {
+        generation: u64,
+    };
+
+    pub fn cval(self: AutocompleteUpdate) C {
+        return .{ .generation = self.generation };
     }
 };
 

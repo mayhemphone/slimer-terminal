@@ -818,6 +818,7 @@ pub const Application = extern struct {
             .check_for_updates,
             .undo,
             .redo,
+            .autocomplete_update, // slimer: macOS popup only for now
             => {
                 log.warn("unimplemented action={}", .{action});
                 return false;
