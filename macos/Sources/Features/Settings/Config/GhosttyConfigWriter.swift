@@ -12,15 +12,25 @@ import Foundation
 /// # <<< slimer managed <<<
 /// ```
 ///
-/// The block is replaced in place when present, otherwise appended at the end of the file
-/// after a blank line. Because later lines win in a Ghostty config, ``analyze(text:keys:)``
-/// reports user lines *after* the block that would override it, so the UI can warn instead
-/// of editing them.
+/// - The block is updated in place when present, otherwise appended at the end of the file
+///   after a blank line.
+/// - Inside the block only lines Settings *owns* (see the `owns` parameter) are rewritten;
+///   comments, unknown keys (e.g. from a newer Slimer) and hand-added lines stay verbatim and
+///   in place.
+/// - Each existing line keeps its own terminator (LF, CRLF, or a trailing lone CR) and a
+///   UTF-8 BOM is kept. New lines use the file's majority line ending.
+/// - Because later lines win in a Ghostty config, ``analyze(lines:keys:managedKeybinds:keybindActions:)``
+///   reports user lines *after* the block that override it, so the UI can warn instead of
+///   editing them.
 ///
 /// Everything here is pure (no I/O) so it can be unit tested exhaustively.
 enum GhosttyConfigWriter {
     static let beginMarker = "# >>> slimer managed (edit in Settings) >>>"
     static let endMarker = "# <<< slimer managed <<<"
+
+    /// Ghostty's config line reader stops at lines longer than this (4096-byte buffer minus
+    /// the `--` prefix it adds).
+    static let maxLineBytes = 4094
 
     /// One managed key and its values, in file order. Repeatable keys (`keybind`,
     /// `font-family`) carry several values; every other key carries exactly one.
@@ -33,6 +43,12 @@ enum GhosttyConfigWriter {
             self.values = values
         }
     }
+
+    /// Decides whether a line inside the block belongs to Settings (and may be rewritten).
+    typealias Ownership = (_ key: String, _ value: String) -> Bool
+
+    /// Owns every line: the whole block is Settings'.
+    static let ownsEverything: Ownership = { _, _ in true }
 
     enum WriteError: Error, Equatable, CustomStringConvertible {
         /// The key is not a plain Ghostty key name (`[a-z0-9-]+`).
@@ -66,24 +82,64 @@ enum GhosttyConfigWriter {
         var value: String
     }
 
-    /// The text split into lines without their terminators, plus the terminator style.
-    struct Lines {
-        var lines: [String]
-        /// `"\r\n"` when the file uses CRLF line endings, otherwise `"\n"`.
+    /// One line and the bytes that ended it: `"\n"`, `"\r\n"`, `"\r"` (a lone CR at the very
+    /// end of the file) or `""` (last line without a terminator).
+    struct Line: Equatable {
+        var content: String
+        var terminator: String
+    }
+
+    /// A file split into lines, keeping everything needed to put it back together exactly.
+    struct Lines: Equatable {
+        var lines: [Line]
+        /// Whether the text started with a UTF-8 byte order mark.
+        var hasBOM: Bool
+        /// The majority line ending, used for new lines.
         var newline: String
-        /// Whether the original text ended with a line terminator.
-        var hasTrailingNewline: Bool
+
+        var contents: [String] { lines.map(\.content) }
+
+        func joined() -> String {
+            (hasBOM ? "\u{FEFF}" : "") + lines.map { $0.content + $0.terminator }.joined()
+        }
     }
 
     static func split(_ text: String) -> Lines {
-        let newline = text.contains("\r\n") ? "\r\n" : "\n"
-        guard !text.isEmpty else { return Lines(lines: [], newline: "\n", hasTrailingNewline: false) }
-        var parts = text.components(separatedBy: "\n")
-        let trailing = parts.last == ""
-        if trailing { parts.removeLast() }
-        // Strip a CR that belongs to a CRLF terminator. A lone CR elsewhere stays put.
-        let lines = parts.map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
-        return Lines(lines: lines, newline: newline, hasTrailingNewline: trailing)
+        var body = Substring(text).unicodeScalars
+        let hasBOM = body.first == "\u{FEFF}"
+        if hasBOM { body = body.dropFirst() }
+
+        var lines: [Line] = []
+        var crlf = 0
+        var lf = 0
+        // Split on LF only (like Ghostty), scalar by scalar: Swift treats "\r\n" as one
+        // Character, so Character-based splitting would miss CRLF lines. A CR right before
+        // the LF is part of the terminator.
+        var current = String.UnicodeScalarView()
+        for scalar in body {
+            guard scalar == "\n" else {
+                current.append(scalar)
+                continue
+            }
+            if current.last == "\r" {
+                current.removeLast()
+                crlf += 1
+                lines.append(Line(content: String(current), terminator: "\r\n"))
+            } else {
+                lf += 1
+                lines.append(Line(content: String(current), terminator: "\n"))
+            }
+            current = String.UnicodeScalarView()
+        }
+        if !current.isEmpty {
+            if current.last == "\r" {
+                current.removeLast()
+                lines.append(Line(content: String(current), terminator: "\r"))
+            } else {
+                lines.append(Line(content: String(current), terminator: ""))
+            }
+        }
+        return Lines(lines: lines, hasBOM: hasBOM, newline: crlf > lf ? "\r\n" : "\n")
     }
 
     /// Parses one config line the way Ghostty does: `key = value`, `#` comments only at the
@@ -125,13 +181,18 @@ enum GhosttyConfigWriter {
 
     // MARK: - Reading the block
 
-    /// The entries currently inside the managed block, in order. Keys keep first-seen order.
-    static func managedEntries(in text: String) throws -> [Entry] {
-        let parsed = split(text)
-        guard let range = try blockRange(in: parsed.lines) else { return [] }
+    /// The owned entries currently inside the managed block, in order. Keys keep first-seen
+    /// order.
+    static func managedEntries(in text: String, owns: Ownership = ownsEverything) throws -> [Entry] {
+        try managedEntries(lines: split(text), owns: owns)
+    }
+
+    static func managedEntries(lines parsed: Lines, owns: Ownership = ownsEverything) throws -> [Entry] {
+        guard let range = try blockRange(in: parsed.contents) else { return [] }
         var entries: [Entry] = []
         for idx in range.lowerBound + 1 ..< range.upperBound {
-            guard let setting = parseSetting(parsed.lines[idx], line: idx + 1) else { continue }
+            guard let setting = parseSetting(parsed.lines[idx].content, line: idx + 1),
+                  owns(setting.key, setting.value) else { continue }
             if let existing = entries.firstIndex(where: { $0.key == setting.key }) {
                 entries[existing].values.append(setting.value)
             } else {
@@ -141,60 +202,101 @@ enum GhosttyConfigWriter {
         return entries
     }
 
+    struct UserSettings: Equatable {
+        var before: [Setting]
+        var after: [Setting]
+        var hasBlock: Bool
+    }
+
     /// Every `key = value` line outside the managed block, in file order.
-    static func userSettings(in text: String) throws -> (before: [Setting], after: [Setting], hasBlock: Bool) {
-        let parsed = split(text)
-        let range = try blockRange(in: parsed.lines)
+    static func userSettings(in text: String) throws -> UserSettings {
+        try userSettings(lines: split(text))
+    }
+
+    static func userSettings(lines parsed: Lines) throws -> UserSettings {
+        let range = try blockRange(in: parsed.contents)
         var before: [Setting] = []
         var after: [Setting] = []
-        for (idx, raw) in parsed.lines.enumerated() {
+        for (idx, line) in parsed.lines.enumerated() {
             if let range, range.contains(idx) { continue }
-            guard let setting = parseSetting(raw, line: idx + 1) else { continue }
+            guard let setting = parseSetting(line.content, line: idx + 1) else { continue }
             if let range, idx > range.upperBound {
                 after.append(setting)
             } else {
                 before.append(setting)
             }
         }
-        return (before, after, range != nil)
+        return UserSettings(before: before, after: after, hasBlock: range != nil)
     }
 
     // MARK: - Writing
 
-    /// Returns `text` with the managed block replaced by `entries` (or appended when the file
-    /// has no block). Lines outside the block are never changed. With no entries (or only
-    /// empty ones) an existing block is removed and nothing is appended.
-    static func render(text: String, entries: [Entry]) throws -> String {
+    /// Returns `text` with the managed block updated to `entries`.
+    ///
+    /// - Lines outside the block are never changed.
+    /// - Inside the block, lines `owns` claims are replaced: a key's new values go where its
+    ///   first owned line was; keys that weren't there are added before the end marker in
+    ///   `entries` order. Every other block line stays verbatim and in place.
+    /// - With no block yet, one is appended (only if there is something to write). A block
+    ///   left with nothing but blank lines is removed.
+    static func render(text: String, entries: [Entry], owns: Ownership = ownsEverything) throws -> String {
+        try render(lines: split(text), entries: entries, owns: owns)
+    }
+
+    static func render(lines parsed: Lines, entries: [Entry], owns: Ownership = ownsEverything) throws -> String {
         for entry in entries {
             guard isValidKey(entry.key) else { throw WriteError.invalidKey(entry.key) }
             for value in entry.values where !isValidValue(value) {
                 throw WriteError.invalidValue(key: entry.key, value: value)
             }
         }
-
-        let parsed = split(text)
-        let range = try blockRange(in: parsed.lines)
-        let body = entries.flatMap { entry in entry.values.map { "\(entry.key) = \($0)" } }
-        let block = body.isEmpty ? [] : [beginMarker] + body + [endMarker]
-
-        var lines = parsed.lines
-        var trailingNewline = parsed.hasTrailingNewline
-        if let range {
-            lines.replaceSubrange(range, with: block)
-        } else if !block.isEmpty {
-            if !lines.isEmpty {
-                // An existing last line without a terminator gets one; a blank line
-                // separates the block from the user's settings.
-                if lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == false {
-                    lines.append("")
-                }
-            }
-            lines += block
-            trailingNewline = true
+        let wanted = entries.filter { !$0.values.isEmpty }
+        let nl = parsed.newline
+        func newLines(_ entry: Entry) -> [Line] {
+            entry.values.map { Line(content: "\(entry.key) = \($0)", terminator: nl) }
         }
 
-        guard !lines.isEmpty else { return "" }
-        return lines.joined(separator: parsed.newline) + (trailingNewline ? parsed.newline : "")
+        var lines = parsed.lines
+        if let range = try blockRange(in: parsed.contents) {
+            var inner: [Line] = []
+            var placed = Set<String>()
+            for idx in range.lowerBound + 1 ..< range.upperBound {
+                let line = parsed.lines[idx]
+                if let setting = parseSetting(line.content, line: idx + 1), owns(setting.key, setting.value) {
+                    if !placed.contains(setting.key), let entry = wanted.first(where: { $0.key == setting.key }) {
+                        inner += newLines(entry)
+                    }
+                    placed.insert(setting.key)
+                    continue
+                }
+                inner.append(line)
+            }
+            for entry in wanted where !placed.contains(entry.key) {
+                inner += newLines(entry)
+            }
+            let keepsSomething = inner.contains { !$0.content.trimmingCharacters(in: .whitespaces).isEmpty }
+            if keepsSomething {
+                var begin = parsed.lines[range.lowerBound]
+                if begin.terminator.isEmpty || begin.terminator == "\r" { begin.terminator = nl }
+                lines.replaceSubrange(range, with: [begin] + inner + [parsed.lines[range.upperBound]])
+            } else {
+                lines.removeSubrange(range)
+            }
+        } else if !wanted.isEmpty {
+            if var last = lines.popLast() {
+                // The last line needs a terminator before anything can follow it.
+                if last.terminator.isEmpty { last.terminator = nl }
+                if last.terminator == "\r" { last.terminator = "\r\n" }
+                lines.append(last)
+                if !last.content.trimmingCharacters(in: .whitespaces).isEmpty {
+                    lines.append(Line(content: "", terminator: nl))
+                }
+            }
+            lines.append(Line(content: beginMarker, terminator: nl))
+            for entry in wanted { lines += newLines(entry) }
+            lines.append(Line(content: endMarker, terminator: nl))
+        }
+        return Lines(lines: lines, hasBOM: parsed.hasBOM, newline: nl).joined()
     }
 
     /// Ghostty key names: lowercase ASCII letters, digits and dashes.
@@ -243,8 +345,8 @@ enum GhosttyConfigWriter {
     /// Something about the user's own lines the UI should explain.
     struct Finding: Equatable, Identifiable {
         enum Kind: Equatable {
-            /// A user line after the block wins over the managed value. Settings can't
-            /// change this key until the user edits that line.
+            /// A user line after the block (or in a file loaded later) wins over the managed
+            /// value. Settings can't change this key until the user edits that line.
             case overriddenAfter
             /// A user line after the block adds to the managed value (fallback font, extra
             /// binding for the same action).
@@ -253,25 +355,48 @@ enum GhosttyConfigWriter {
             case setBefore
             /// `config-file` includes load after this file and may override anything.
             case include
+            /// A line longer than Ghostty reads; Ghostty stops reading the file there, so
+            /// the block is never loaded.
+            case longLine
         }
 
         var kind: Kind
         var key: String
         var line: Int
         var value: String
+        /// Another file the line is in (nil for the config file being edited).
+        var file: String?
 
-        var id: String { "\(kind)-\(key)-\(line)" }
+        init(kind: Kind, key: String, line: Int, value: String, file: String? = nil) {
+            self.kind = kind
+            self.key = key
+            self.line = line
+            self.value = value
+            self.file = file
+        }
+
+        var id: String { "\(kind)-\(key)-\(file ?? "")-\(line)" }
+
+        private var location: String {
+            guard let file else { return "line \(line)" }
+            return "\((file as NSString).abbreviatingWithTildeInPath) line \(line)"
+        }
 
         var message: String {
             switch kind {
             case .overriddenAfter:
+                if file != nil {
+                    return "\(location) sets \(key) and loads after your config; Settings can't change it."
+                }
                 return "Your config sets \(key) on line \(line) after Slimer's block; Settings can't change it."
             case .addsAfter:
-                return "Your config also sets \(key) on line \(line) after Slimer's block; it is added to Slimer's value."
+                return "Your config also sets \(key) on \(location) after Slimer's block; it is added to Slimer's value."
             case .setBefore:
                 return "Your config sets \(key) on line \(line); Slimer's block comes later and takes precedence."
             case .include:
                 return "Line \(line) includes “\(value)”, which loads after this file and can override any setting."
+            case .longLine:
+                return "Line \(line) is longer than \(GhosttyConfigWriter.maxLineBytes) bytes. Ghostty stops reading the file there, so nothing after it (including Slimer's block) applies."
             }
         }
     }
@@ -289,7 +414,16 @@ enum GhosttyConfigWriter {
         managedKeybinds: [String] = [],
         keybindActions: Set<String> = []
     ) throws -> [Finding] {
-        let settings = try userSettings(in: text)
+        try analyze(lines: split(text), keys: keys, managedKeybinds: managedKeybinds, keybindActions: keybindActions)
+    }
+
+    static func analyze(
+        lines parsed: Lines,
+        keys: Set<String>,
+        managedKeybinds: [String] = [],
+        keybindActions: Set<String> = []
+    ) throws -> [Finding] {
+        let settings = try userSettings(lines: parsed)
         var findings: [Finding] = []
 
         let managedTriggers = Set(managedKeybinds.compactMap { KeybindValue(parsing: $0)?.normalizedTrigger })
@@ -332,6 +466,14 @@ enum GhosttyConfigWriter {
 
         for setting in settings.before + settings.after where setting.key == "config-file" {
             findings.append(Finding(kind: .include, key: setting.key, line: setting.line, value: setting.value))
+        }
+
+        // Ghostty stops reading at an over-long line; one before the block (or anywhere,
+        // when the block will be appended) hides the block.
+        let blockStart = (try blockRange(in: parsed.contents))?.lowerBound ?? parsed.lines.count
+        for idx in 0 ..< blockStart where parsed.lines[idx].content.utf8.count > maxLineBytes {
+            findings.append(Finding(kind: .longLine, key: "", line: idx + 1, value: ""))
+            break
         }
         return findings.sorted { $0.line < $1.line }
     }

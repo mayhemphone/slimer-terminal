@@ -99,6 +99,12 @@
                                     <action selector="openSettings:" target="bbz-4X-AYv" id="X65-fg-iWU"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Open Config File" id="Slm-oC-fg1">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <connections>
+                                    <action selector="openConfig:" target="bbz-4X-AYv" id="Slm-oC-ac1"/>
+                                </connections>
+                            </menuItem>
                             <menuItem isSeparatorItem="YES" id="GOd-qX-exa"/>
                             <menuItem title="Reload Configuration" id="KKH-XX-5py">
                                 <modifierMask key="keyEquivalentModifierMask"/>

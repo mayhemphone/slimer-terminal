@@ -49,6 +49,18 @@ enum SettingsKeySpec: Equatable {
 
     static var orderedKeys: [String] { all.map(\.key) }
 
+    /// Whether a line in Slimer's block belongs to Settings (and may be rewritten). Keys
+    /// outside the registry stay untouched. For `keybind`, only `global:` bindings of the
+    /// three managed actions and `global:` unbinds in the recorder grammar are Settings';
+    /// any other keybind someone adds to the block is kept.
+    static func owns(key: String, value: String) -> Bool {
+        guard spec(for: key) != nil else { return false }
+        guard key == "keybind" else { return true }
+        guard let bind = KeybindValue(parsing: value), bind.prefixes == ["global"] else { return false }
+        if bind.action == "unbind" { return KeyTrigger.isValid(bind.trigger) }
+        return ManagedGlobalAction(rawValue: bind.action) != nil
+    }
+
     /// Allowed values for an enumeration key (empty for other kinds).
     static func allowedValues(for key: String) -> [String] {
         if case .enumeration(let values) = spec(for: key) { return values }
@@ -277,7 +289,7 @@ enum SettingsValidator {
         }
         guard isGlobal,
               ManagedGlobalAction(rawValue: bind.action) != nil,
-              KeyTrigger.isValid(bind.trigger, requireModifier: true) else {
+              KeyTrigger.globalHotkeyError(bind.trigger) == nil else {
             return .failure(.invalidKeybind(value))
         }
         return .success("global:\(bind.trigger)=\(bind.action)")

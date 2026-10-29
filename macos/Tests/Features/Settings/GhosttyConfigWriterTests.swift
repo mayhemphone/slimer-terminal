@@ -58,8 +58,8 @@ struct GhosttyConfigWriterTests {
     }
 
     @Test func markersWithSurroundingWhitespaceAreRecognized() throws {
-        let text = "  \(begin)  \ntheme = Nord\n\(end)\t\n"
-        #expect(try Writer.render(text: text, entries: [Entry("theme", ["X"])]) == "\(begin)\ntheme = X\n\(end)\n")
+        let text = "  \(begin)  \ntheme = Nord\n\(end)\t\n"  // markers are kept verbatim
+        #expect(try Writer.render(text: text, entries: [Entry("theme", ["X"])]) == "  \(begin)  \ntheme = X\n\(end)\t\n")
     }
 
     // MARK: Preserve
@@ -190,6 +190,108 @@ struct GhosttyConfigWriterTests {
     @Test func ignoresUnrelatedKeysAndComments() throws {
         let text = "# theme = X\nfont-size = 3\n\(begin)\n\(end)\n#theme = Y\n"
         #expect(try Writer.analyze(text: text, keys: ["theme"]).isEmpty)
+    }
+
+    // MARK: Foreign lines inside the block
+
+    @Test func keepsForeignBlockLinesVerbatimAndInPlace() throws {
+        let text = """
+        a = 1
+        \(begin)
+        # a note I wrote
+        theme = Old
+        slimer-future-key = 7
+        keybind = cmd+k=clear_screen
+        keybind = global:cmd+j=toggle_quick_terminal
+        keybind = global:cmd+o=unbind
+        keybind = global:cmd+u=goto_tab:1
+          font-size =  12
+        \(end)
+
+        """
+        let out = try Writer.render(text: text, entries: [
+            Entry("theme", ["New"]),
+            Entry("keybind", ["global:cmd+f1=toggle_quick_terminal"]),
+            Entry("quick-terminal-position", ["right"]),
+        ], owns: SettingsKeySpec.owns)
+        #expect(out == """
+        a = 1
+        \(begin)
+        # a note I wrote
+        theme = New
+        slimer-future-key = 7
+        keybind = cmd+k=clear_screen
+        keybind = global:cmd+f1=toggle_quick_terminal
+        keybind = global:cmd+u=goto_tab:1
+        quick-terminal-position = right
+        \(end)
+
+        """)
+        // Only owned lines are read back as managed.
+        #expect(try Writer.managedEntries(in: text, owns: SettingsKeySpec.owns) == [
+            Entry("theme", ["Old"]),
+            Entry("keybind", ["global:cmd+j=toggle_quick_terminal", "global:cmd+o=unbind"]),
+            Entry("font-size", ["12"]),
+        ])
+    }
+
+    @Test func blockWithOnlyForeignLinesIsKept() throws {
+        let text = "\(begin)\n# keep me\ntheme = Nord\n\(end)\n"
+        #expect(try Writer.render(text: text, entries: [], owns: SettingsKeySpec.owns)
+                == "\(begin)\n# keep me\n\(end)\n")
+        let blankOnly = "x = 1\n\(begin)\n\ntheme = Nord\n\(end)\n"
+        #expect(try Writer.render(text: blankOnly, entries: [], owns: SettingsKeySpec.owns) == "x = 1\n")
+    }
+
+    // MARK: Terminators and BOM
+
+    @Test func keepsEachLinesTerminatorAndUsesMajorityForNewLines() throws {
+        let text = "a = 1\r\nb = 2\r\nc = 3\n"
+        let out = try Writer.render(text: text, entries: [Entry("theme", ["Nord"])])
+        #expect(out == "a = 1\r\nb = 2\r\nc = 3\n\r\n\(begin)\r\ntheme = Nord\r\n\(end)\r\n")
+
+        let mixedBlock = "x\n\(begin)\r\ntheme = A\n\(end)\r\ny\r\n"
+        let replaced = try Writer.render(text: mixedBlock, entries: [Entry("theme", ["B"])])
+        // Majority is CRLF (3 of 5); the markers and outside lines keep their own endings.
+        #expect(replaced == "x\n\(begin)\r\ntheme = B\r\n\(end)\r\ny\r\n")
+    }
+
+    @Test func keepsBOM() throws {
+        let text = "\u{FEFF}a = 1\n"
+        let out = try Writer.render(text: text, entries: [Entry("theme", ["Nord"])])
+        #expect(out == "\u{FEFF}a = 1\n\n\(begin)\ntheme = Nord\n\(end)\n")
+        #expect(try Writer.render(text: out, entries: [Entry("theme", ["X"])]).hasPrefix("\u{FEFF}a = 1\n"))
+        #expect(Writer.split(text).lines.first?.content == "a = 1")
+    }
+
+    @Test func keepsTrailingLoneCR() throws {
+        let text = "\(begin)\ntheme = A\n\(end)\r"
+        #expect(try Writer.render(text: text, entries: [Entry("theme", ["B"])]) == "\(begin)\ntheme = B\n\(end)\r")
+        let lines = Writer.split("a\r")
+        #expect(lines.lines == [GhosttyConfigWriter.Line(content: "a", terminator: "\r")])
+        #expect(lines.joined() == "a\r")
+        #expect(try Writer.render(text: "a = 1\r", entries: [Entry("theme", ["B"])])
+                == "a = 1\r\n\n\(begin)\ntheme = B\n\(end)\n")
+    }
+
+    @Test func splitJoinRoundTrips() {
+        for text in ["", "a", "a\n", "a\r\n", "a\r", "\n\n", "\u{FEFF}x\r\ny\nz", "a\rb\n"] {
+            #expect(Writer.split(text).joined() == text, "\(text.debugDescription)")
+        }
+    }
+
+    // MARK: Long lines
+
+    @Test func warnsAboutOverlongLineBeforeBlock() throws {
+        let long = "font-family = " + String(repeating: "x", count: 4100)
+        let findings = try Writer.analyze(text: "a = 1\n\(long)\n\(begin)\n\(end)\n", keys: [])
+        #expect(findings.map(\.kind) == [.longLine])
+        #expect(findings.first?.line == 2)
+        // After the block it doesn't hide the block.
+        #expect(try Writer.analyze(text: "\(begin)\n\(end)\n\(long)\n", keys: []).isEmpty)
+        // Exactly the limit is fine.
+        let edge = String(repeating: "y", count: GhosttyConfigWriter.maxLineBytes)
+        #expect(try Writer.analyze(text: "\(edge)\n", keys: []).isEmpty)
     }
 
     // MARK: Keybind parsing

@@ -21,31 +21,54 @@ struct GhosttyConfigFileTests {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = GhosttyConfigFile(url: dir.appendingPathComponent("config"))
-        #expect(try file.read() == "")
-        try file.write("theme = Nord\n", backup: true)
+        let snapshot = try file.readSnapshot()
+        #expect(snapshot.text == "")
+        #expect(snapshot.stamp == nil)
+        try file.write("theme = Nord\n", expected: nil, backup: true)
         #expect(try file.read() == "theme = Nord\n")
         // Nothing to back up for a new file.
-        #expect(!FileManager.default.fileExists(atPath: file.backupURL.path))
+        #expect(file.backups().isEmpty)
     }
 
-    @Test func preservesPermissionsAndKeepsSingleBackup() throws {
+    @Test func preservesPermissionsAndXattrs() throws {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("config")
         try "font-size = 14\n".write(to: url, atomically: false, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: url.path)
+        let value = Array("slimer".utf8)
+        #expect(setxattr(url.path, "top.mayhem.test", value, value.count, 0, 0) == 0)
 
         let file = GhosttyConfigFile(url: url)
-        try file.write("font-size = 14\nA\n", backup: true)
-        try file.write("font-size = 14\nB\n", backup: true)
+        let snapshot = try file.readSnapshot()
+        try file.write("font-size = 14\nA\n", expected: snapshot.stamp, backup: false)
 
-        #expect(try mode(url) == 0o600)
-        #expect(try String(contentsOf: file.backupURL, encoding: .utf8) == "font-size = 14\n")
-        #expect(file.backupURL.lastPathComponent == "config.slimer-backup")
-        #expect(try file.read() == "font-size = 14\nB\n")
+        #expect(try mode(url) == 0o640)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let size = getxattr(url.path, "top.mayhem.test", &buffer, buffer.count, 0, 0)
+        #expect(size == value.count)
+        #expect(Array(buffer.prefix(max(size, 0))) == value)
         // No temp files left behind.
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".tmp") }
         #expect(leftovers.isEmpty)
+    }
+
+    @Test func timestampedBackupsKeepNewestThree() throws {
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config")
+        try "v0\n".write(to: url, atomically: false, encoding: .utf8)
+        let file = GhosttyConfigFile(url: url)
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        for n in 1...5 {
+            try file.write("v\(n)\n", expected: nil, checkUnchanged: false, backup: true,
+                           now: base.addingTimeInterval(Double(n)))
+        }
+        let backups = file.backups()
+        #expect(backups.count == 3)
+        #expect(backups.allSatisfy { $0.lastPathComponent.hasPrefix("config.slimer-backup-") })
+        #expect(try backups.map { try String(contentsOf: $0, encoding: .utf8) } == ["v2\n", "v3\n", "v4\n"])
+        #expect(file.backupURL(at: base).lastPathComponent.count == "config.slimer-backup-YYYYMMDD-HHMMSS".count)
     }
 
     @Test func writesThroughSymlink() throws {
@@ -59,12 +82,63 @@ struct GhosttyConfigFileTests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
 
         let file = GhosttyConfigFile(url: link)
-        try file.write("a = 2\n", backup: true)
+        let snapshot = try file.readSnapshot()
+        try file.write("a = 2\n", expected: snapshot.stamp, backup: true)
 
         let linkDest = try FileManager.default.destinationOfSymbolicLink(atPath: link.path)
         #expect(linkDest == target.path)
         #expect(try String(contentsOf: target, encoding: .utf8) == "a = 2\n")
-        #expect(FileManager.default.fileExists(atPath: dotfiles.appendingPathComponent("ghostty.conf.slimer-backup").path))
+        #expect(file.backups().first?.deletingLastPathComponent().lastPathComponent == "dotfiles")
+    }
+
+    @Test func danglingSymlinkIsAnError() throws {
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let link = dir.appendingPathComponent("config")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: dir.appendingPathComponent("missing/conf"))
+        let file = GhosttyConfigFile(url: link)
+        #expect(throws: GhosttyConfigFile.FileError.danglingSymlink(link.path)) { try file.read() }
+        #expect(throws: GhosttyConfigFile.FileError.danglingSymlink(link.path)) {
+            try file.write("x = 1\n", expected: nil, backup: false)
+        }
+        // The link is still a link.
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: link.path)) != nil)
+    }
+
+    @Test func refusesReadOnlyFile() throws {
+        let dir = try makeDir()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dir.appendingPathComponent("config").path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let url = dir.appendingPathComponent("config")
+        try "a = 1\n".write(to: url, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: url.path)
+        let file = GhosttyConfigFile(url: url)
+        let snapshot = try file.readSnapshot()
+        #expect(throws: GhosttyConfigFile.FileError.readOnly(file.targetURL.path)) {
+            try file.write("a = 2\n", expected: snapshot.stamp, backup: true)
+        }
+        #expect(try file.read() == "a = 1\n")
+    }
+
+    @Test func abortsWhenFileChangedSinceRead() throws {
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config")
+        try "a = 1\n".write(to: url, atomically: false, encoding: .utf8)
+        let file = GhosttyConfigFile(url: url)
+        let snapshot = try file.readSnapshot()
+        // An editor saves (rename over the file) after our read.
+        try "a = 1\nb = 2\n".write(to: url, atomically: true, encoding: .utf8)
+        #expect(throws: GhosttyConfigFile.FileError.changedOnDisk(file.targetURL.path)) {
+            try file.write("a = 1\nX\n", expected: snapshot.stamp, backup: false)
+        }
+        #expect(try file.read() == "a = 1\nb = 2\n")
+        // A file that appeared after a "missing" read is also a change.
+        let fresh = GhosttyConfigFile(url: dir.appendingPathComponent("new"))
+        try "y\n".write(to: fresh.url, atomically: false, encoding: .utf8)
+        #expect(throws: GhosttyConfigFile.FileError.self) { try fresh.write("z\n", expected: nil, backup: false) }
     }
 
     @Test func refusesNonRegularFiles() throws {
@@ -91,6 +165,20 @@ struct GhosttyConfigFileTests {
         }
     }
 
+    @Test func keepsUTF8BOMOnDisk() throws {
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config")
+        try Data([0xEF, 0xBB, 0xBF] + Array("a = 1\n".utf8)).write(to: url)
+        let file = GhosttyConfigFile(url: url)
+        let snapshot = try file.readSnapshot()
+        let rendered = try GhosttyConfigWriter.render(text: snapshot.text, entries: [.init("theme", ["Nord"])])
+        try file.write(rendered, expected: snapshot.stamp, backup: false)
+        let data = try Data(contentsOf: url)
+        #expect(data.starts(with: [0xEF, 0xBB, 0xBF, UInt8(ascii: "a")]))
+        #expect(data.filter { $0 == 0xEF }.count == 1)
+    }
+
     @Test func endToEndKeepsUserLines() throws {
         let dir = try makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -99,11 +187,12 @@ struct GhosttyConfigFileTests {
         try original.write(to: url, atomically: false, encoding: .utf8)
 
         let file = GhosttyConfigFile(url: url)
-        let rendered = try GhosttyConfigWriter.render(text: try file.read(), entries: [
+        let snapshot = try file.readSnapshot()
+        let rendered = try GhosttyConfigWriter.render(text: snapshot.text, entries: [
             .init("font-family", ["\"\"", "JetBrains Mono"]),
             .init("keybind", ["global:cmd+backquote=toggle_quick_terminal"]),
         ])
-        try file.write(rendered, backup: true)
+        try file.write(rendered, expected: snapshot.stamp, backup: true)
 
         let text = try file.read()
         #expect(text.hasPrefix(original))
@@ -111,6 +200,6 @@ struct GhosttyConfigFileTests {
             .init("font-family", ["", "JetBrains Mono"]),
             .init("keybind", ["global:cmd+backquote=toggle_quick_terminal"]),
         ])
-        #expect(try String(contentsOf: file.backupURL, encoding: .utf8) == original)
+        #expect(try file.backups().map { try String(contentsOf: $0, encoding: .utf8) } == [original])
     }
 }
