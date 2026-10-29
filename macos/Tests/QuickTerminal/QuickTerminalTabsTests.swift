@@ -103,13 +103,17 @@ struct QuickTerminalTabsTests {
 
     @Test func selectByIndexAndID() {
         var (tabs, all) = makeTabs(3)
-        #expect(tabs.select(index: 2))
+        let selectedTwo = tabs.select(index: 2)
+        #expect(selectedTwo)
         #expect(tabs.selected === all[2])
-        #expect(!tabs.select(index: 3))
+        let selectedOutOfRange = tabs.select(index: 3)
+        #expect(!selectedOutOfRange)
         #expect(tabs.selectedIndex == 2)
-        #expect(tabs.select(id: all[0].id))
+        let selectedFirstByID = tabs.select(id: all[0].id)
+        #expect(selectedFirstByID)
         #expect(tabs.selectedIndex == 0)
-        #expect(!tabs.select(id: UUID()))
+        let selectedUnknownID = tabs.select(id: UUID())
+        #expect(!selectedUnknownID)
     }
 
     // MARK: Remove
@@ -154,8 +158,10 @@ struct QuickTerminalTabsTests {
 
     @Test func removeOutOfRangeIsNoop() {
         var (tabs, _) = makeTabs(2)
-        #expect(tabs.remove(at: 5) == nil)
-        #expect(tabs.remove(id: UUID()) == nil)
+        let removedByIndex = tabs.remove(at: 5)
+        #expect(removedByIndex == nil)
+        let removedByID = tabs.remove(id: UUID())
+        #expect(removedByID == nil)
         #expect(tabs.count == 2)
     }
 
