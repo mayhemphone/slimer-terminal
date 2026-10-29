@@ -177,6 +177,14 @@ struct ShortcutOverlayConfigTests {
         #expect(Ghostty.Config.SlimerShortcutOverlay.off.modifier == nil)
     }
 
+    @Test func delayIsClampedTo250Milliseconds() {
+        #expect(Ghostty.Config.slimerShortcutOverlayDelay(milliseconds: 0) == 0.25)
+        #expect(Ghostty.Config.slimerShortcutOverlayDelay(milliseconds: 100) == 0.25)
+        #expect(Ghostty.Config.slimerShortcutOverlayDelay(milliseconds: 250) == 0.25)
+        #expect(Ghostty.Config.slimerShortcutOverlayDelay(milliseconds: 1500) == 1.5)
+        #expect(Ghostty.Config.slimerShortcutOverlayDelay(milliseconds: 2000) == 2)
+    }
+
     @Test func settingsAcceptOnlyKnownValues() throws {
         #expect(try SettingsValidator.validate(key: "slimer-shortcut-overlay", value: "cmd").get() == "cmd")
         #expect((try? SettingsValidator.validate(key: "slimer-shortcut-overlay", value: "shift").get()) == nil)

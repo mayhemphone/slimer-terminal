@@ -30,14 +30,22 @@ extension Ghostty.Config {
         return SlimerShortcutOverlay(rawValue: String(cString: ptr)) ?? defaultValue
     }
 
-    /// `slimer-shortcut-overlay-delay` in seconds.
+    /// The shortest hold that shows the sheet; shorter configured delays are raised to this.
+    static let slimerShortcutOverlayMinimumDelay: TimeInterval = 0.25
+
+    /// Milliseconds from the config to seconds, clamped to the minimum.
+    static func slimerShortcutOverlayDelay(milliseconds: UInt) -> TimeInterval {
+        max(TimeInterval(milliseconds) / 1000, slimerShortcutOverlayMinimumDelay)
+    }
+
+    /// `slimer-shortcut-overlay-delay` in seconds, at least 250 ms.
     var slimerShortcutOverlayDelay: TimeInterval {
         let defaultValue: TimeInterval = 2
         guard let config = self.config else { return defaultValue }
         var v: UInt = 0
         let key = "slimer-shortcut-overlay-delay"
         guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
-        return TimeInterval(v) / 1000
+        return Self.slimerShortcutOverlayDelay(milliseconds: v)
     }
 
     /// One configured top-level keybind, read through `ghostty_config_keybind_at`.

@@ -50,6 +50,15 @@ struct ShortcutOverlayHoldDetectorTests {
         #expect(d.flagsChanged(.control) == .startTimer)
     }
 
+    /// A keyDown consumed by an earlier monitor (or the system) never arrives; its
+    /// keyUp does, and is reported as other input too.
+    @Test func keyUpAloneStillCancels() {
+        var d = armed()
+        #expect(d.otherInput() == .cancelTimer) // keyUp of the consumed key
+        #expect(d.timerFired() == .none)
+        #expect(d.state == .blocked)
+    }
+
     @Test func addingAnotherModifierCancels() {
         var d = armed()
         #expect(d.flagsChanged([.control, .shift]) == .cancelTimer)

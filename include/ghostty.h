@@ -1239,6 +1239,7 @@ GHOSTTY_API ghostty_string_s ghostty_config_open_path(void);
 // slimer: apply one color `key=value` argument (allowlisted keys only, see CApi.zig).
 GHOSTTY_API bool ghostty_config_load_arg(ghostty_config_t, const char*);
 // slimer: read-only keybind enumeration (shortcut overlay, see CApi.zig).
+// ghostty_config_keybind_at returns false for a NULL or zero-length buffer.
 GHOSTTY_API uintptr_t ghostty_config_keybind_count(ghostty_config_t);
 GHOSTTY_API bool ghostty_config_keybind_at(ghostty_config_t,
                                            uintptr_t,

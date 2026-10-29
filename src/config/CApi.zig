@@ -197,16 +197,17 @@ export fn ghostty_config_keybind_count(self: *Config) usize {
 // slimer: read one top-level keybind. Writes the trigger and flags to `out`
 // and the action (in config syntax, e.g. `goto_split:left`) to `buf` as a
 // NUL-terminated string, truncated to fit. Returns false for an index out of
-// range, a sequence leader (`a>b`), or a zero-length buffer. Chained bindings
+// range, a sequence leader (`a>b`), or a null or zero-length buffer. Chained bindings
 // report their first action. Nothing in the config is modified.
 export fn ghostty_config_keybind_at(
     self: *Config,
     index: usize,
     out: *Keybind,
-    buf: [*]u8,
+    buf: ?[*]u8,
     buf_len: usize,
 ) bool {
-    return config_keybind_at_(self, index, out, buf[0..buf_len]);
+    const ptr = buf orelse return false;
+    return config_keybind_at_(self, index, out, ptr[0..buf_len]);
 }
 
 fn config_keybind_at_(
@@ -497,9 +498,10 @@ test "slimer: ghostty_config_keybind_at enumerates bindings" {
     // `ctrl+a>n` is a sequence: its leader is skipped.
     try testing.expectEqual(@as(usize, 1), leaders);
 
-    // Out of range and empty buffers are refused.
+    // Out of range, empty and null buffers are refused.
     try testing.expect(!ghostty_config_keybind_at(&cfg, count, &out, &buf, buf.len));
     try testing.expect(!ghostty_config_keybind_at(&cfg, 0, &out, &buf, 0));
+    try testing.expect(!ghostty_config_keybind_at(&cfg, 0, &out, null, 64));
 }
 
 test "slimer: ghostty_config_keybind_at truncates the action" {

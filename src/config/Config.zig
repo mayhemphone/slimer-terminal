@@ -2484,7 +2484,8 @@ keybind: Keybinds = .{},
 // slimer: see slimer-shortcut-overlay.
 /// How long the `slimer-shortcut-overlay` modifier must be held on its own
 /// before the shortcut sheet appears. Uses the same duration syntax as
-/// `resize-overlay-duration` (for example `2s` or `1500ms`).
+/// `resize-overlay-duration` (for example `2s` or `1500ms`). Values below
+/// `250ms` are treated as `250ms`.
 ///
 /// Default: `2s`.
 ///

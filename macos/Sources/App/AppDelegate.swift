@@ -246,12 +246,15 @@ class AppDelegate: NSObject,
         NSApp.servicesMenu = menuServices
         SlimerClaudeMenu.install() // slimer: File > Claude submenu
 
+        // slimer: hold-modifier shortcut sheet. Installed before the monitor below so it
+        // sees keyDowns that monitor consumes.
+        ShortcutOverlayController.shared.install(config: ghostty.config)
+
         // Setup a local event monitor for app-level keyboard shortcuts. See
         // localEventHandler for more info why.
         _ = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown],
             handler: localEventHandler)
-        ShortcutOverlayController.shared.install(config: ghostty.config) // slimer: hold-modifier shortcut sheet
 
         // Notifications
         NotificationCenter.default.addObserver(

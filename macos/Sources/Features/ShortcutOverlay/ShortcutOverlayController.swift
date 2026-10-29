@@ -52,6 +52,13 @@ final class ShortcutOverlayController {
         observers.append(center.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.cancel() }
         })
+        // A system shortcut (Ctrl-arrow, Mission Control) can switch spaces without the
+        // app ever seeing the key.
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancel() }
+        })
         // Any menu edit (items added, removed, retitled, re-keyed, enabled) invalidates
         // the menu part. Posted synchronously, so this only flips a flag.
         for name in [NSMenu.didAddItemNotification, NSMenu.didRemoveItemNotification, NSMenu.didChangeItemNotification] {
@@ -63,20 +70,21 @@ final class ShortcutOverlayController {
                 }
             })
         }
+        // Installed once, here, and never removed: local monitors run in the order they
+        // were added, and AppDelegate adds a keyDown monitor that can consume events right
+        // after this. With the sheet `off` the handler is a single nil check.
+        installMonitor()
         apply(config)
     }
 
     func apply(_ config: Ghostty.Config) {
         self.config = config
         keybindGroups = nil
-        delay = max(0, config.slimerShortcutOverlayDelay)
+        delay = config.slimerShortcutOverlayDelay
         let setting = config.slimerShortcutOverlay
         perform(detector.setTrigger(setting.modifier))
         if let modifier = setting.modifier {
             holdHint = "Release \(ShortcutGlyphs.modifierGlyphs(modifier)) to close"
-            installMonitor()
-        } else {
-            removeMonitor()
         }
     }
 
@@ -85,19 +93,16 @@ final class ShortcutOverlayController {
     private func installMonitor() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+            matching: [.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
         ) { [weak self] event in
             MainActor.assumeIsolated { self?.observe(event) }
             return event
         }
     }
 
-    private func removeMonitor() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
-    }
-
-    /// The hot path. Never changes or consumes the event.
+    /// The hot path. Never changes or consumes the event. keyUp is observed too: an
+    /// earlier monitor or the system may consume a keyDown, but any key going up while
+    /// the modifier is held still means "not held alone".
     private func observe(_ event: NSEvent) {
         if event.type == .flagsChanged {
             perform(detector.flagsChanged(event.modifierFlags))
@@ -140,6 +145,7 @@ final class ShortcutOverlayController {
     /// The key terminal window (normal or quick terminal), if any.
     private var targetWindow: NSWindow? {
         guard let window = NSApp.keyWindow,
+              NSApp.isActive, window.isKeyWindow, window.isOnActiveSpace,
               window.isVisible, !window.isMiniaturized,
               window.windowController is BaseTerminalController else { return nil }
         return window

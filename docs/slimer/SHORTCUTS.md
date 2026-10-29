@@ -12,6 +12,8 @@ slimer-shortcut-overlay = ctrl        # ctrl | cmd | option | off
 slimer-shortcut-overlay-delay = 2s    # any Ghostty duration: 1500ms, 1s, ...
 ```
 
+The delay has a 250 ms minimum; shorter values are raised to 250 ms.
+
 Both are plain Ghostty keys and can be changed at runtime. Settings ▸ General ▸
 Shortcut Sheet edits them (the delay picker offers 0.5 to 5 seconds; a value
 from your own config stays selectable).
@@ -19,12 +21,14 @@ from your own config stays selectable).
 ## When it shows
 
 - The modifier must be down **alone**. Caps Lock and Fn don't count.
-- Pressing any other key, another modifier, a mouse button, or scrolling while
-  it is held cancels the timer, and the modifier has to be released before it
-  can arm again. Ctrl-C, Ctrl-R and friends never show the sheet.
-- Releasing the modifier, pressing a key, clicking, the app deactivating, or
-  the key window changing hides it.
-- It only appears over terminal windows (not Settings or other panels).
+- Pressing or releasing any other key, another modifier, a mouse button, or
+  scrolling while it is held cancels the timer (key-up is watched too, because
+  another monitor or the system may consume a key-down), and the modifier has
+  to be released before it can arm again. Ctrl-C, Ctrl-R and friends never show the sheet.
+- Releasing the modifier, pressing a key, clicking, the app deactivating, the
+  key window changing, or the active space changing hides it.
+- It only appears over a terminal window that is key, on the active space, in
+  the active app (not Settings or other panels).
 
 ## What it lists
 
@@ -64,9 +68,12 @@ unbound-from-menu or global binds.
 ## Speed and safety
 
 - One in-app local event monitor (`NSEvent.addLocalMonitorForEvents`) for
-  `flagsChanged`, `keyDown`, mouse-down and scroll. It always returns the event
-  unchanged, so nothing is delayed or swallowed. No global monitor, no event
-  tap, no Accessibility use. With `off` the monitor is removed.
+  `flagsChanged`, `keyDown`, `keyUp`, mouse-down and scroll, installed before
+  AppDelegate's app-level keyDown monitor so it sees keys that monitor
+  consumes (local monitors run in the order they were added; it stays
+  installed, so a config change can't reorder it). It always returns the event unchanged, so nothing is delayed or swallowed. No
+  global monitor, no event tap, no Accessibility use. With `off` the handler is
+  a single nil check.
 - Per event the work is one modifier-flag compare and at most starting or
   cancelling a timer (`ShortcutOverlayHoldDetector`, a pure state machine).
 - Content is built on show and cached until the config reloads or a menu item
