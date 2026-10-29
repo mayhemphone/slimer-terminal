@@ -28,8 +28,8 @@ final class ThemeController {
     enum Assignment: Equatable {
         /// Rules decide.
         case automatic
-        /// The user picked a theme (`nil` = "None, use config"). Rules are ignored.
-        case explicit(UUID?)
+        /// The user pinned a theme, a Ghostty theme, or "None, use config". Rules are ignored.
+        case explicit(ThemePin)
     }
 
     private static let assignmentsKey = "SlimerSurfaceThemes"
@@ -52,6 +52,11 @@ final class ThemeController {
         let dark: Bool
     }
     private var configCache: [CacheKey: Ghostty.Config] = [:]
+    /// Configs built for previews (the Theme Browser), most recent last. Kept separate and
+    /// small so browsing hundreds of themes doesn't keep hundreds of configs alive, while
+    /// arrowing back and forth over the last few stays instant.
+    private var previewCache: [(key: CacheKey, config: Ghostty.Config)] = []
+    private static let previewCacheLimit = 12
     private var namedThemeCache: [String: [String]?] = [:]
     private weak var cacheBase: Ghostty.Config?
     private var warned = Set<String>()
@@ -64,12 +69,27 @@ final class ThemeController {
     private final class SurfaceState {
         weak var view: Ghostty.SurfaceView?
         var cancellables = Set<AnyCancellable>()
-        /// The theme currently pushed to the core. `nil` means the base config.
+        /// The theme the surface should have (pinned or chosen by rules) and, outside a
+        /// preview, the one pushed to the core. `nil` means the base config.
         var applied: SurfaceTheme?
+        /// Set while the Theme Browser previews a theme on this surface: what is pushed to
+        /// the core instead of ``applied``. Rules and pins don't touch the surface meanwhile.
+        var preview: Preview?
 
         init(view: Ghostty.SurfaceView) {
             self.view = view
         }
+
+        /// What the core shows right now.
+        var shown: SurfaceTheme? {
+            if let preview { return preview.theme }
+            return applied
+        }
+    }
+
+    private struct Preview {
+        /// `nil` previews the base config.
+        var theme: SurfaceTheme?
     }
 
     init(store: ThemeStore = .shared, defaults: UserDefaults = .ghostty) {
@@ -181,28 +201,46 @@ final class ThemeController {
     /// The theme a surface should have right now, before considering what is applied.
     func desiredTheme(for view: Ghostty.SurfaceView) -> SurfaceTheme? {
         switch assignment(for: view.id) {
-        case .explicit(let themeId):
-            guard let themeId else { return nil }
+        case .explicit(let pin):
+            return theme(for: pin)
+        case .automatic:
+            return ruleTheme(for: view)
+        }
+    }
+
+    /// The theme a pin applies (nil = base config).
+    func theme(for pin: ThemePin) -> SurfaceTheme? {
+        switch pin {
+        case .none:
+            return nil
+        case .theme(let themeId):
             guard let theme = store.theme(id: themeId) else {
                 warnOnce("pin:\(themeId)", "theme: pinned theme \(themeId.uuidString) not found in themes.json")
                 return nil
             }
             return theme
-        case .automatic:
-            let context = ThemeRuleMatcher.Context(
-                pwd: view.pwd,
-                title: view.title,
-                localHostnames: localHostnames
-            )
-            guard let rule = ThemeRuleMatcher.match(rules: store.rules, context: context, home: home) else {
-                return nil
-            }
-            return store.theme(id: rule.themeId)
+        case .ghostty(let name):
+            return ThemePin.surfaceTheme(forGhosttyName: name)
         }
+    }
+
+    /// The theme the rules pick for `view` right now, ignoring any pin.
+    func ruleTheme(for view: Ghostty.SurfaceView) -> SurfaceTheme? {
+        let context = ThemeRuleMatcher.Context(
+            pwd: view.pwd,
+            title: view.title,
+            localHostnames: localHostnames
+        )
+        guard let rule = ThemeRuleMatcher.match(rules: store.rules, context: context, home: home) else {
+            return nil
+        }
+        return store.theme(id: rule.themeId)
     }
 
     private func evaluate(_ id: UUID, force: Bool = false) {
         guard let state = surfaces[id], let view = state.view, let app else { return }
+        // A preview owns the surface until it ends; ``endPreview(for:)`` re-evaluates.
+        guard state.preview == nil else { return }
         let desired = desiredTheme(for: view)
 
         // Nothing applied and nothing wanted: leave the surface on the base config.
@@ -223,6 +261,7 @@ final class ThemeController {
 
     private func invalidateCaches() {
         configCache.removeAll()
+        previewCache.removeAll()
         namedThemeCache.removeAll()
         warned.removeAll()
     }
@@ -253,39 +292,66 @@ final class ThemeController {
     /// A finalized config for `theme` on top of `base`, or nil if the theme changes nothing
     /// (use `base` as is). Configs built on the app's current config are cached per theme
     /// until that config is replaced, so N surfaces sharing a theme share one build.
-    func themedConfig(for theme: SurfaceTheme, base: Ghostty.Config) -> Ghostty.Config? {
+    ///
+    /// With `preview`, a build that isn't already cached goes to a small most-recently-used
+    /// cache instead (see ``previewCache``).
+    func themedConfig(for theme: SurfaceTheme, base: Ghostty.Config, preview: Bool = false) -> Ghostty.Config? {
         guard let baseCfg = base.config else { return nil }
         let cacheable = base === app?.config
         if cacheable && cacheBase !== base {
             configCache.removeAll()
+            previewCache.removeAll()
             cacheBase = base
         }
         let dark = isDark
         let key = CacheKey(theme: theme, dark: dark)
         if cacheable, let cached = configCache[key] { return cached }
+        if cacheable, let index = previewCache.firstIndex(where: { $0.key == key }) {
+            let entry = previewCache.remove(at: index)
+            if preview {
+                previewCache.append(entry)
+            } else {
+                // Committed: promote it to the regular cache.
+                configCache[key] = entry.config
+            }
+            return entry.config
+        }
 
         let named = namedThemeArgs(for: theme, dark: dark) ?? []
         let args = ThemeApplier.configArgs(for: theme, namedThemeArgs: named)
         guard !args.isEmpty else { return nil }
         guard let config = ThemeApplier.makeConfig(base: baseCfg, args: args) else { return nil }
-        if cacheable { configCache[key] = config }
+        if cacheable {
+            if preview {
+                previewCache.append((key, config))
+                if previewCache.count > Self.previewCacheLimit { previewCache.removeFirst() }
+            } else {
+                configCache[key] = config
+            }
+        }
         return config
     }
 
     /// Hook for `Ghostty.App.reloadConfig(surface:soft:)`. A per-surface reload (e.g. a
     /// light/dark color scheme change) would otherwise push the plain base config and wipe
-    /// the surface's theme. Returns nil when the surface has no theme.
+    /// the surface's theme (or its preview). Returns nil when the surface shows no theme.
     func themedConfig(forSurface surface: ghostty_surface_t, base: Ghostty.Config) -> Ghostty.Config? {
         guard let state = surfaces.values.first(where: { $0.view?.surface == surface }),
-              let theme = state.applied else { return nil }
-        return themedConfig(for: theme, base: base)
+              let theme = state.shown else { return nil }
+        return themedConfig(for: theme, base: base, preview: state.preview != nil)
     }
 
     /// Pushes `theme` (or the base config for nil) to the surface. Returns false if nothing
     /// could be applied.
-    private func apply(_ theme: SurfaceTheme?, to view: Ghostty.SurfaceView, app: Ghostty.App) -> Bool {
+    private func apply(
+        _ theme: SurfaceTheme?,
+        to view: Ghostty.SurfaceView,
+        app: Ghostty.App,
+        preview: Bool = false
+    ) -> Bool {
         guard let surface = view.surface, let base = app.config.config else { return false }
-        if let theme, let themed = themedConfig(for: theme, base: app.config), let cfg = themed.config {
+        if let theme, let themed = themedConfig(for: theme, base: app.config, preview: preview),
+           let cfg = themed.config {
             ghostty_surface_update_config(surface, cfg)
         } else {
             ghostty_surface_update_config(surface, base)
@@ -300,8 +366,14 @@ final class ThemeController {
 
     /// After a global config reload every surface is back on the base config.
     private func reapplyAll() {
-        for (id, state) in surfaces where state.applied != nil {
-            evaluate(id, force: true)
+        for (id, state) in surfaces {
+            if let preview = state.preview {
+                if let view = state.view, let app, preview.theme != nil {
+                    _ = apply(preview.theme, to: view, app: app, preview: true)
+                }
+            } else if state.applied != nil {
+                evaluate(id, force: true)
+            }
         }
     }
 
@@ -315,7 +387,7 @@ final class ThemeController {
 
     /// The accent of the theme currently applied to `view`, if any.
     func accentColor(for view: Ghostty.SurfaceView) -> NSColor? {
-        guard let hex = surfaces[view.id]?.applied?.accent else { return nil }
+        guard let hex = surfaces[view.id]?.shown?.accent else { return nil }
         return NSColor(strictHex: hex)
     }
 
@@ -332,25 +404,75 @@ final class ThemeController {
     // MARK: Explicit assignments
 
     func assignment(for surfaceId: UUID) -> Assignment {
-        guard let entry = storedAssignments()[surfaceId.uuidString] else { return .automatic }
-        let raw = entry["theme"] as? String ?? ""
-        return .explicit(UUID(uuidString: raw))
+        Self.assignment(fromStored: storedAssignments()[surfaceId.uuidString])
     }
 
-    /// The theme currently applied to `view` (nil = base config).
+    /// Decodes one stored entry (nil = no entry). Pure; see ``ThemePin`` for the format.
+    static func assignment(fromStored entry: [String: Any]?) -> Assignment {
+        guard let entry else { return .automatic }
+        return .explicit(ThemePin(storedEntry: entry))
+    }
+
+    /// The stored entry for a pin made at `date`.
+    static func storedEntry(for pin: ThemePin, at date: Date) -> [String: Any] {
+        var entry = pin.storedFields
+        entry["at"] = date.timeIntervalSince1970
+        return entry
+    }
+
+    /// The theme currently applied to `view` (nil = base config), ignoring any preview.
     func appliedTheme(for view: Ghostty.SurfaceView) -> SurfaceTheme? {
         surfaces[view.id]?.applied
     }
 
     /// Pins `themeId` (or "None" when nil) to this surface. Rules no longer apply to it.
     func setExplicitTheme(_ themeId: UUID?, for view: Ghostty.SurfaceView) {
+        setPin(themeId.map { .theme($0) } ?? .none, for: view)
+    }
+
+    /// Pins `pin` to this surface. Rules no longer apply to it. A Ghostty name that isn't a
+    /// plain theme file name is refused.
+    func setPin(_ pin: ThemePin, for view: Ghostty.SurfaceView) {
+        if case .ghostty(let name) = pin, ThemePin.validGhosttyName(name) == nil {
+            ThemeStore.logger.warning("theme: refused to pin an invalid Ghostty theme name")
+            return
+        }
         var all = storedAssignments()
-        all[view.id.uuidString] = [
-            "theme": themeId?.uuidString ?? "",
-            "at": Date().timeIntervalSince1970,
-        ]
+        all[view.id.uuidString] = Self.storedEntry(for: pin, at: Date())
         writeAssignments(all)
         if surfaces[view.id] == nil { register(view) } else { evaluate(view.id) }
+    }
+
+    // MARK: Preview
+
+    /// Shows `theme` (nil = base config) on `view` without pinning it or writing anything.
+    /// Rules and pin changes don't touch the surface until ``endPreview(for:)``.
+    func preview(_ theme: SurfaceTheme?, on view: Ghostty.SurfaceView) {
+        guard let app else { return }
+        if surfaces[view.id] == nil { register(view) }
+        guard let state = surfaces[view.id] else { return }
+        if let current = state.preview, current.theme == theme { return }
+        state.preview = Preview(theme: theme)
+        _ = apply(theme, to: view, app: app, preview: true)
+        pushAccent(for: view.id, force: false)
+    }
+
+    /// Ends a preview and puts back what the surface should have: its pin, or what the rules
+    /// pick. Call it after changing the pin to commit, or alone to revert.
+    func endPreview(for view: Ghostty.SurfaceView) {
+        guard let state = surfaces[view.id], state.preview != nil else { return }
+        state.preview = nil
+        guard let app else { return }
+        let desired = desiredTheme(for: view)
+        guard apply(desired, to: view, app: app) else { return }
+        state.applied = desired
+        pushAccent(for: view.id, force: false)
+        NotificationCenter.default.post(name: .slimerSurfaceThemeDidChange, object: view)
+    }
+
+    /// True while a preview is shown on `view`.
+    func isPreviewing(_ view: Ghostty.SurfaceView) -> Bool {
+        surfaces[view.id]?.preview != nil
     }
 
     /// Returns the surface to rule-driven theming.

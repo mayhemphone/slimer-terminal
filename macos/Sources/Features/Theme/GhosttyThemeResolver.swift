@@ -35,6 +35,14 @@ enum GhosttyThemeResolver {
         return name.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
     }
 
+    /// A single theme file name as Settings and pins accept it: a safe name that also has no
+    /// `,`, `:` or `#` (so it can't be read as a `light:…,dark:…` pair or a comment) and no
+    /// surrounding whitespace.
+    static func isPlainName(_ name: String) -> Bool {
+        isSafeName(name) && !name.contains(",") && !name.contains(":") && !name.contains("#")
+            && name == name.trimmingCharacters(in: .whitespaces)
+    }
+
     /// Picks the name to use from `X` or `light:X,dark:Y` (Ghostty's syntax).
     /// Returns nil if the value is malformed.
     static func selectName(_ value: String, dark: Bool) -> String? {
@@ -75,6 +83,29 @@ enum GhosttyThemeResolver {
             dirs.append(resources.appendingPathComponent("ghostty/themes", isDirectory: true))
         }
         return dirs
+    }
+
+    /// Theme names in `directories`: regular files with plain names (``isPlainName(_:)``),
+    /// deduplicated (the first directory wins), sorted case-insensitively. Does file I/O, so
+    /// call it off the main thread.
+    static func themeNames(in directories: [URL]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for dir in directories {
+            let entries = (try? FileManager.default.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            for url in entries {
+                let name = url.lastPathComponent
+                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                      isPlainName(name),
+                      seen.insert(name).inserted else { continue }
+                result.append(name)
+            }
+        }
+        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     /// Color args for `value` (a name or `light:…,dark:…` pair), or nil if it can't be

@@ -1656,6 +1656,7 @@ extension Ghostty {
             item = menu.addItem(withTitle: "Change Tab Title...", action: #selector(BaseTerminalController.changeTabTitle(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "pencil.line")
             item = menu.addItem(withTitle: "Change Terminal Title...", action: #selector(changeTitle(_:)), keyEquivalent: "")
+            ThemeMenu.appendSurfaceContextItems(to: menu, surface: self) // slimer: per-terminal theme
 
             return menu
         }

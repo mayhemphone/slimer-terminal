@@ -207,10 +207,7 @@ enum SettingsValidator {
     /// A bundled or user theme name, or `light:X,dark:Y`. Names may not look like paths.
     static func validateThemeValue(_ value: String) -> Result<String, SettingsValidationError> {
         let key = "theme"
-        func isPlainName(_ name: String) -> Bool {
-            GhosttyThemeResolver.isSafeName(name) && !name.contains(",") && !name.contains(":")
-                && !name.contains("#") && name == name.trimmingCharacters(in: .whitespaces)
-        }
+        func isPlainName(_ name: String) -> Bool { GhosttyThemeResolver.isPlainName(name) }
         if isPlainName(value) { return .success(value) }
         let parts = value.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         if parts.count == 2, parts[0].hasPrefix("light:"), parts[1].hasPrefix("dark:") {

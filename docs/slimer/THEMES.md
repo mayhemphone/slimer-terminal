@@ -130,7 +130,8 @@ still apply, and the menu shows "(Ghostty theme not found)". The item is disable
 theme has nothing else to apply.
 
 Theme application only happens on events: a pwd or title change (debounced 150 ms), a menu
-choice, a themes.json change, or a config reload. Nothing runs per frame or per keystroke.
+choice, a Theme Browser move (throttled to one per 50 ms), a themes.json change, or a config
+reload. Nothing runs per frame or per typed keystroke.
 
 ## Rules
 
@@ -167,8 +168,23 @@ one evaluation per 150 ms, using the latest title, so constantly changing titles
 evaluated.
 
 **Explicit wins.** Picking a theme (or "None") from a menu pins it to that surface, and
-rules stop applying to it. "Automatic (follow rules)" removes the pin. Pins are stored in
-the app's user defaults, keyed by the surface's stable id. Because of that, they survive
+rules stop applying to it. "Automatic (follow rules)" removes the pin. A pin is one of:
+a themes.json theme (by id), "None", or a **Ghostty theme by name** (chosen in the Theme
+Browser; nothing is added to themes.json). Pins are stored in
+the app's user defaults (key `SlimerSurfaceThemes`), keyed by the surface's stable id:
+
+| Pin | Stored entry |
+|---|---|
+| themes.json theme | `{"theme": "<uuid>", "at": <time>}` (the original format) |
+| None | `{"theme": "", "at": <time>}` |
+| Ghostty theme | `{"theme": "", "ghostty": "<name>", "at": <time>}` |
+
+Older entries decode unchanged, and an older Slimer reads a Ghostty pin as "None". The
+stored name is untrusted: it must be a plain theme file name (the same check as Settings'
+`theme`: no `/`, `\`, `..`, leading `~` or `.`, `,`, `:`, `#`, control characters or
+surrounding spaces, at most 128 bytes), or the pin reads as "None". It is applied through
+the same colors-only path as `ghosttyTheme` (resolver, then the `ghostty_config_load_arg`
+allowlist); the name itself never reaches libghostty. Because of that, they survive
 window restoration, undo of a closed tab, and moving a surface between tabs or windows.
 A pin's timestamp is refreshed whenever its surface is seen again. Pins for surfaces that
 no longer exist expire after 30 days. Surface ids only persist through macOS window
@@ -183,8 +199,16 @@ compared against your rules and never executed or written into a config.
 
 ## Menus
 
-- **Terminal ▸ Terminal Theme ▸** acts on the focused terminal of the key window. It lists:
+- **Right-click a terminal ▸ Terminal Theme ▸** acts on the terminal you clicked, so each
+  split can get its own colors. This is the main way in.
+- **View ▸ Terminal Theme ▸** acts on the focused terminal of the key window. The View
+  menu is found by upstream's font size / command palette / inspector actions (falling
+  back to the title "View"), so a localized title doesn't break it. If it can't be found,
+  an error is logged (category `themes`).
+- Both submenus (and the tab context menu's **Theme ▸**) list:
+  - "Browse Themes…" (⌃⌘T), see below.
   - "None (use config)" and "Automatic (follow rules)".
+  - A pinned Ghostty theme, if any ("Ghostty Theme: Nord", checked, disabled).
   - Every theme. A checkmark means pinned; a dash means chosen by a rule.
   - "Always Use “X” for ~/path", which adds a `pathPrefix` rule for the current directory
     using the applied theme, and replaces any existing rule for that exact path.
@@ -193,9 +217,52 @@ compared against your rules and never executed or written into a config.
   same **Theme ▸** submenu (for that tab's focused terminal) and **Tab Accent ▸** ("Follow
   Theme" / "Custom Color…").
 
+### Theme Browser
+
+"Browse Themes…" opens a small popover at the top of the target terminal (the clicked
+one from the right-click menu, the focused one from the View menu or ⌃⌘T) with a search
+field and one list: "None (use config)", "Automatic (follow rules)", the themes.json
+themes, then every Ghostty theme (the same directories and name check as the resolver and
+Settings ▸ Appearance; the directory scan runs in the background and is cached).
+
+- **↑ / ↓** (or a click) preview the row **on that terminal only**. Page Up / Page Down
+  jump a screenful. Typing filters (case- and accent-insensitive); if the selected row is
+  filtered out, the first match is selected and previewed.
+- **Enter** or a **double-click** keeps it: the row is pinned ("Automatic" removes the
+  pin).
+- **Esc**, clicking outside, or opening another browser reverts the terminal to exactly
+  what it had (its pin, or what the rules pick).
+
+A preview writes nothing (no themes.json, no pin, no config file). While it is shown,
+rules and pin changes don't touch that terminal; a config reload re-applies the preview.
+Previews are throttled: the first goes out at once, then at most one every 50 ms for the
+latest row, so holding an arrow key never queues stale work. Resolved Ghostty theme colors
+are cached per name until themes.json or the config changes, and the last 12 preview
+configs are kept so arrowing back and forth is instant; committed themes go to the
+regular cache. The logic is `ThemeBrowserModel`; `ThemeBrowser` wires it to an
+`NSPopover` with an AppKit table. The search field keeps keyboard focus (the table refuses
+first responder), so typing always filters and the arrows, Enter and Esc always reach the
+model.
+
+Tests (`macos/Tests/Features/Theme/ThemeBrowserTests.swift`): View menu install (by action,
+localized title, title fallback, missing menu, idempotent), the ⌃⌘T match, pin
+decode/encode including the original format and rejected names, and the browser model
+(initial row not previewed, throttling to the latest row, clamping, filter, commit and
+revert exactly once, rows from themes and theme names).
+
+**Why ⌃⌘T:** no default Ghostty keybind uses `ctrl+super+t` (`ghostty +list-keybinds
+--default`), and macOS doesn't reserve it. If you bind it yourself in the Ghostty config,
+your binding wins (the terminal handles bound keys before the menu). The key is answered
+by the menu delegate (`menuHasKeyEquivalent`), so pressing it doesn't rebuild the menu.
+
 Command palette integration is not wired yet. The palette is owned by another feature.
 Entry points it can call: `ThemeController.shared.setExplicitTheme(_:for:)`,
-`clearExplicitTheme(for:)`, `addFolderRule(for:themeId:)`.
+`setPin(_:for:)`, `clearExplicitTheme(for:)`, `addFolderRule(for:themeId:)`, and
+`ThemeBrowser.shared.show(for:)`.
+
+Upstream hooks: `App/AppDelegate.swift` calls `ThemeMenu.install(into:app:)`, and
+`Ghostty/Surface View/SurfaceView_AppKit.swift` `menu(for:)` has one `// slimer:` line that
+appends the Terminal Theme submenu to the right-click menu.
 
 ## Tab accent and tab color
 
