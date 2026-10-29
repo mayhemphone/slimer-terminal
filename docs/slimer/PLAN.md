@@ -137,6 +137,7 @@ Files: `macos/Sources/Features/QuickTerminal/*` (`QuickTerminalController.swift`
 
 - Replace the placeholder `SettingsView.swift` with a real SwiftUI settings window: General (hotkeys, startup), Drawer (position/size/animation/stacking with live preview), Themes & Tabs (rules), Locations, Commands, Git, Autocomplete, Updates.
 - Ghostty-native keys are written back to the Ghostty config file under a fenced block (`# >>> fork managed >>> … # <<<`) and `reload_config` is triggered; our own data goes to `workspace.json`. Show Ghostty's diagnostics (`ConfigurationErrorsView` exists) when the write produces errors.
+- Status: built (General, Drawer, Appearance, Themes & Tabs, Locations & Commands, Git & Status Bar, Claude, Advanced); the block marker is `# >>> slimer managed (edit in Settings) >>>`. Autocomplete and Updates panes are still to do. See `SETTINGS.md`.
 
 ## Phase 8: Windows (GhosttyWin32 base)
 

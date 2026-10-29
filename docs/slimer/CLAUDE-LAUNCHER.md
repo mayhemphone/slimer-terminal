@@ -27,7 +27,9 @@ Closing Claude closes its tab (Ghostty's normal `command` behavior).
 
 ## UI
 
-- **Status bar button:** click = new tab, Option-click = split right. The chevron
+- **Status bar button:** click = new tab, Option-click = split right (swapped when
+  Settings ▸ Claude sets the default open mode to "Split to the right"; stored in
+  `UserDefaults` as `SlimerClaudeDefaultPlacement`). The chevron
   menu offers Claude Here (New Tab), Claude Here (Split Right), Continue Last
   (`claude --continue`), Resume… (`claude --resume`). When Claude is not installed
   the menu shows a disabled "Claude Code Not Installed" item and "Install Claude
