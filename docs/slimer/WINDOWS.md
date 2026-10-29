@@ -357,26 +357,49 @@ rewritten.
 
 ### 5.5 Workspace (locations, commands, recent directories)
 
-- **Read:** `macos/Sources/Features/Workspace/` (`WorkspaceModels.swift`,
+- **Read:** `macos/Sources/Features/Workspace/` (`JSONValue.swift`,
+  `WorkspaceModels.swift`, `WorkspaceLocalModels.swift`,
   `WorkspaceStore.swift`, `WorkspacePath.swift`, `WorkspaceShell.swift`,
   `WorkspaceShortcut.swift`, `WorkspaceActions.swift`,
-  `WorkspacePaletteOptions.swift`), `WORKSPACE.md`.
+  `WorkspacePaletteOptions.swift`), `WORKSPACE.md` ("Syncing between
+  machines" and "Per-machine files").
 - **Portable:** the `workspace.json` schema, frecency, the safety rules
   (only text from your own file is typed, Enter only at an idle prompt,
   never clear the input line).
-- **Where the files live on Windows** (`workspace.json` and
-  `themes.json`): `%XDG_CONFIG_HOME%\slimer\` when `XDG_CONFIG_HOME` is set
-  to an absolute path, otherwise `%APPDATA%\slimer\` (roaming, so it
-  follows a roaming profile). Write atomically with `ReplaceFileW` (keeps
-  the target's ACL; follow a symlinked file to its target first so a
-  dotfiles symlink survives).
-- **Decisions needed for a file shared between Mac and PC:**
-  - Paths: `~/Dev/app` works on both. An absolute path for the other OS
-    (`/Users/...` on Windows, `C:\...` on macOS) must be **kept and
-    hidden**, never dropped: today the macOS store drops malformed entries
-    and rewrites the file on usage updates, which would delete Windows
-    locations. Before sharing the file, make both stores keep
-    unrecognised entries verbatim (or add an optional `"platforms"` field).
+- **Where the files live on Windows:** the synced files (`workspace.json`,
+  `themes.json`) in `%XDG_CONFIG_HOME%\slimer\` when `XDG_CONFIG_HOME` is
+  set to an absolute path, otherwise `%APPDATA%\slimer\` (roaming, so it
+  follows a roaming profile). The per-machine files (`recent.json`,
+  `usage.json`) in `%XDG_STATE_HOME%\slimer\` when set to an absolute path,
+  otherwise `%LOCALAPPDATA%\Slimer\` (not roaming). Write atomically with
+  `ReplaceFileW` (keeps the target's ACL; follow a symlinked file to its
+  target first so a dotfiles symlink survives).
+- **Sharing `workspace.json` between Mac and PC (decided, implemented on
+  macOS):**
+  - Lossless round trip: keep unknown keys on the document and on every
+    entry, keep a known key's original value when it has the wrong type
+    until the field is edited, and keep unusable entries verbatim at their
+    array position (never shown). A `version` newer than the build
+    understands makes the file read-only. The Windows store must do the
+    same, or it will delete what macOS wrote (and vice versa).
+  - Paths: `path`/`cwd` is the portable default (`~/Dev/app` works on
+    both); optional `paths`/`cwds` objects with `macos`, `windows`,
+    `linux` keys override it per OS. Windows resolves `paths.windows`,
+    else `path`. An entry with no usable path on the running OS
+    (`/Users/...` on Windows, `C:\...` or only `paths.windows` on macOS)
+    is **hidden but kept**. Expand `~` to `%USERPROFILE%`; accept drive
+    paths (`C:\...`) and `\\wsl$\`/`\\wsl.localhost\` UNC paths as
+    absolute. Settings edits only `paths.windows` when it exists, else
+    `path`.
+  - Recent directories and usage counts are per machine (`recent.json`,
+    `usage.json`, keyed by entry id) so the synced file only changes when
+    the user edits it. Migrate this machine's entries (drive-letter paths
+    on Windows) from a legacy `recent` array once and leave the array in
+    `workspace.json` untouched; use legacy `useCount`/`lastUsed` as a seed
+    only. Entries without an `id` derive a stable one from their content
+    (SHA-256 of the canonical JSON, see `derivedID` in
+    `WorkspaceModels.swift`); matching that derivation keeps usage stable
+    on both platforms until an id is saved.
   - Shortcuts: the macOS rule "must include `cmd`" has no Windows
     equivalent. Proposal: on Windows `cmd` means `ctrl+alt`, or add an
     optional `shortcutWindows` field.

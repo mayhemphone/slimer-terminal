@@ -9,7 +9,8 @@ Slimer is a fork of Ghostty. Upstream is tracked on `main` (remote `upstream`); 
 
 ## Where our data lives
 - Ghostty's config file stays authoritative for Ghostty keys.
-- Slimer's own data (locations, saved commands, per-tab themes, pins, usage stats) lives in `~/.config/slimer/workspace.json`, owned by the Workspace feature. It must be safe to sync between machines.
+- Slimer's own data (locations, saved commands, per-tab themes, pins) lives in `~/.config/slimer/workspace.json`, owned by the Workspace feature. It must be safe to sync between machines: written losslessly (unknown keys and entries kept) and only on user edits.
+- Per-machine data (recent directories, usage stats) lives in `~/Library/Application Support/Slimer/` (`$XDG_STATE_HOME/slimer/` when set) and is never synced. See `WORKSPACE.md`.
 
 ## Security rules (non-negotiable)
 - Never execute anything derived from terminal output, shell-reported state, or a new OSC payload. Those channels are untrusted: length-capped, sanitized, and only ever used as data.

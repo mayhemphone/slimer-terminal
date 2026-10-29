@@ -5,13 +5,17 @@ the commands you run all day, from the command palette, a top-level
 **Workspace** menu with per-item keyboard shortcuts, and pins. It also learns
 the directories you visit from the shell's working-directory reports.
 
-Everything is stored in one JSON file so it can be synced between machines
-with your dotfiles:
+Your locations and commands are stored in one JSON file so it can be synced
+between machines (dotfiles repo, cloud folder), including a Windows PC:
 
 ```
 $XDG_CONFIG_HOME/slimer/workspace.json      (if XDG_CONFIG_HOME is an absolute path)
 ~/.config/slimer/workspace.json             (otherwise)
 ```
+
+What a machine learns by itself (recent directories, usage counts) is kept
+next to it in per-machine files that are **not** meant to be synced (see
+[Per-machine files](#per-machine-files)).
 
 Code lives in `macos/Sources/Features/Workspace/`.
 
@@ -23,13 +27,15 @@ Code lives in `macos/Sources/Features/Workspace/`.
   at your dotfiles repo.
 - Reloaded automatically when it changes on disk (editor save, sync tool).
   **Workspace > Reload Workspace** forces a reload.
-- Parsing is tolerant: unknown keys are ignored, missing fields take defaults,
-  and a malformed entry is dropped. If the whole file fails to parse, Slimer
+- Reading and writing are **lossless** (see [Syncing](#syncing-between-machines)):
+  unknown keys and entries Slimer can't use are kept and written back.
+  Missing fields take defaults. If the whole file fails to parse, Slimer
   keeps running with an empty workspace, logs the error, shows a disabled
   "workspace.json could not be read" item in the menu, and **never overwrites
   the file** until it parses again.
-- Dates are ISO 8601 strings. Slimer rewrites the file (pretty printed, sorted
-  keys) when it records usage.
+- Slimer only rewrites the file (pretty printed, sorted keys) when you edit
+  locations or commands in Settings, or to create it on first run. Using a
+  location or command, or visiting a directory, never touches it.
 
 ### Schema
 
@@ -40,15 +46,18 @@ Code lives in `macos/Sources/Features/Workspace/`.
     {
       "id": "6C0B5D54-7E2B-4B5B-9F6B-6A7B6B9C4E11", // UUID; generated if missing
       "name": "league-view-backend",               // defaults to the last path component
-      "path": "~/Dev/league-view-backend",         // required; "~" is expanded
+      "path": "~/Dev/league-view-backend",         // portable path; "~" is expanded
+      "paths": {                                    // optional per-OS overrides
+        "macos": "~/Dev/league-view-backend",
+        "windows": "C:\\Users\\zach\\dev\\league-view-backend",
+        "linux": "~/dev/league-view-backend"
+      },
       "icon": "server.rack",                        // optional SF Symbol name
       "color": "#FF8800",                           // optional #RRGGBB
       "pinned": true,                               // default false
       "shortcut": "cmd+shift+3",                    // optional, Ghostty style
       "startupCommand": "claude",                   // optional; typed into NEW tabs/splits/windows
-      "startupConfirm": true,                       // default true: typed, you press Enter
-      "useCount": 12,                               // maintained by Slimer
-      "lastUsed": "2026-10-28T14:03:11Z"            // maintained by Slimer
+      "startupConfirm": true                        // default true: typed, you press Enter
     }
   ],
   "commands": [
@@ -57,21 +66,34 @@ Code lives in `macos/Sources/Features/Workspace/`.
       "name": "Claude (continue)",                  // defaults to the command text
       "command": "claude --continue",               // required
       "cwd": "~/Dev/league-view-backend",           // optional; prepends `cd '<cwd>' && `
+      "cwds": { "windows": "C:\\Users\\zach\\dev" },  // optional per-OS overrides of cwd
       "pinned": true,
       "shortcut": "cmd+shift+c",
-      "confirm": true,                              // default true, see below
-      "useCount": 3,
-      "lastUsed": "2026-10-28T14:03:11Z"
+      "confirm": true                               // default true, see below
     }
-  ],
-  "recent": [                                       // learned automatically, max 50
-    { "path": "/Users/me/Dev/other", "count": 7, "lastVisited": "2026-10-27T09:12:00Z" }
   ]
 }
 ```
 
-Location paths must be absolute after `~` expansion (`~user` is not
-expanded); other paths are rejected with a beep.
+A location needs `path` or at least one `paths` value; a command needs
+`command`. Each entry needs an `id` (a UUID) so this machine's usage
+statistics can refer to it; Slimer adds one when it next saves the file
+(until then an id is derived from the entry's content, so it is stable).
+
+**Per-OS paths.** On macOS a location uses `paths.macos` if it is set,
+otherwise `path` (and a command uses `cwds.macos`, otherwise `cwd`). Keep
+`path`/`cwd` as the portable default (`~/Dev/app` works everywhere) and add
+`paths`/`cwds` only where an OS needs something else, such as
+`C:\Users\zach\dev\app` or `\\wsl$\Ubuntu\home\zach\dev\app` on Windows.
+The path must be absolute after `~` expansion (`~user` is not expanded).
+Entries with no usable path on this OS (only `paths.windows`, or a `path`
+like `C:\...`) and commands whose only directory is for another OS are
+**hidden** on this machine: not in the menu, palette or Settings lists, but
+kept in the file.
+
+Files written by older versions may contain `useCount`/`lastUsed` on
+entries and a top-level `recent` array. They are kept as they are (never
+rewritten or removed); see [Per-machine files](#per-machine-files).
 
 Shortcut strings use Ghostty's spelling: modifiers `cmd`/`command`/`super`,
 `shift`, `ctrl`/`control`, `alt`/`opt`/`option`, joined with `+`, plus one key:
@@ -135,7 +157,7 @@ Safety rules (see `CONVENTIONS.md`):
   are locations are skipped); these open a new tab.
 
 Pinned items are listed first, then by frecency. Shortcuts are shown as key
-symbols.
+symbols. Only entries usable on this OS are listed.
 
 **Workspace menu** (between View/Terminal and Window):
 
@@ -169,16 +191,68 @@ after it is not counted again; a directory is counted at most once a minute.
 The list is capped at 50 entries; the lowest-scoring ones are dropped, never
 the directory that was just visited.
 
+## Per-machine files
+
+Recent directories and usage statistics are specific to one machine (they
+would mix `/Users/...` with `C:\...` and change on every use, causing sync
+conflicts), so they live outside the synced file:
+
+```
+$XDG_STATE_HOME/slimer/                     (if XDG_STATE_HOME is an absolute path)
+~/Library/Application Support/Slimer/      (otherwise)
+  recent.json   {"version": 1, "recent": [{"path": "/Users/me/Dev/other", "count": 7, "lastVisited": "2026-10-27T09:12:00Z"}]}
+  usage.json    {"version": 1, "usage": {"<entry id>": {"useCount": 12, "lastUsed": "2026-10-28T14:03:11Z"}}}
+```
+
+Both are written atomically with mode `0600` (directory `0700`), like
+`workspace.json`. They are a cache: an unreadable one is logged and
+replaced. **Settings > Workspace > Recent > Clear Recent** empties
+`recent.json`.
+
+- **Migration.** The first time Slimer runs without a `recent.json` and
+  `workspace.json` has a `recent` array (written by an older version), it
+  copies this machine's entries (absolute `/...` paths that pass the
+  learning rules above) into `recent.json`. The `recent` array stays in
+  `workspace.json` untouched, because it may hold other machines' entries.
+- **Usage seed.** `useCount`/`lastUsed` left on an entry by an older version
+  are used until the entry is first used on this machine; from then on
+  `usage.json` counts (starting from that seed). They are never rewritten.
+
+## Syncing between machines
+
+`workspace.json` can be shared by several Macs and PCs (the Windows port
+will use the same schema, see `WINDOWS.md`):
+
+- **Lossless.** Keys Slimer doesn't know (on the document or any entry, for
+  example from a newer Slimer or the Windows build) are written back
+  unchanged. A known key whose value has the wrong type (`"pinned": "yes"`)
+  takes its default in memory and its original value is written back until
+  you change that field in Settings. An entry that can't be used at all (not
+  an object, no path, no command) is never shown but stays in its position
+  in the array. Slimer logs how many such entries it kept each time it reads
+  a changed file. JSON formatting is not preserved (files are written pretty
+  printed with sorted keys) and `1.0` may be written as `1`.
+- **Newer files are read-only.** If `version` is greater than what this
+  Slimer understands (currently `1`), its entries are shown but the file is
+  never written: Settings disables editing, as for an unreadable file. Usage
+  and recent directories still go to the per-machine files.
+- **Writes only on edits.** Only editing locations or commands rewrites the
+  file, so syncing it causes no churn.
+- **Settings edits this OS's path.** The location editor's Path field edits
+  `paths.macos` when the location has one, otherwise `path` (the command
+  editor's "Run in" field does the same for `cwds.macos`/`cwd`). Other OS
+  values are never changed from a Mac.
+
 ## Saving
 
 Before every write Slimer re-reads `workspace.json`. If it changed on disk
 since Slimer last read or wrote it (an edit the file watcher has not delivered
-yet), the disk version is loaded first and the usage update is re-applied on
-top, so hand edits and synced changes are not overwritten.
+yet), the disk version is loaded first and the edit is re-applied on top, so
+hand edits and synced changes are not overwritten.
 
-When the app runs as an XCTest host it uses a throwaway file in the temporary
-directory and does not watch it, so running tests never touches your real
-`workspace.json`.
+When the app runs as an XCTest host it uses a throwaway `workspace.json` and
+per-machine directory in the temporary directory and does not watch them, so
+running tests never touches your real files.
 
 ## Tests
 
@@ -187,4 +261,8 @@ trips, tolerant parsing, the seed, frecency ordering and cap, shell quoting
 and the insert-safety check, `~` expansion and XDG resolution, shortcut
 parsing, and the store's disk behaviour (seeding, permissions, invalid-file
 handling, usage persistence, reload, the file watcher, and symlink-preserving
-atomic writes). Run them with `macos/build.nu --action test`.
+atomic writes). `WorkspaceSyncModelTests` and the sync tests in
+`WorkspaceStoreTests` cover the lossless round trip (unknown keys, unusable
+entries in position), newer-version read-only mode, per-OS path resolution
+and hiding, the `recent` migration, local usage statistics, and Settings
+edits of `paths.macos`. Run them with `macos/build.nu --action test`.
