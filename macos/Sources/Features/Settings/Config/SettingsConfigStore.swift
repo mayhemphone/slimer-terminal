@@ -4,33 +4,49 @@ import GhosttyKit
 import OSLog
 
 /// The Settings window's view of the Ghostty config: what Slimer's managed block holds,
-/// what the user's own lines say, and what Ghostty actually loaded.
+/// what the user's own lines (and other config files) say, and what Ghostty loaded.
 ///
-/// Edits are validated, collected, and written 300 ms after the last change (so a slider
-/// doesn't rewrite the file on every tick). Each write re-reads the file, replaces only the
-/// managed block, writes atomically, then reloads the config. When the reloaded config
-/// arrives, every written key Ghostty can report is compared with what was written; keys
-/// that didn't apply get a badge.
+/// - Reading and parsing happen on a background queue (``ConfigScan``); published state is
+///   only changed on the main thread.
+/// - Edits are validated, collected, and written 300 ms after the last change (so a slider
+///   doesn't rewrite the file on every tick), also off the main thread. Pending edits are
+///   flushed when the window closes and when the app quits.
+/// - Each write re-reads the file, rewrites only Settings' own lines in the block, refuses
+///   to recreate a file that disappeared (an editor mid-save), writes atomically and aborts
+///   if the file changed underneath (retrying once), then reloads the config. When the
+///   reloaded config arrives, every written key Ghostty can report is compared with what was
+///   written; keys that didn't apply get a badge.
 @MainActor
 final class SettingsConfigStore: ObservableObject {
-    static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.slimer", category: "settings")
+    typealias Finding = GhosttyConfigWriter.Finding
+    typealias UserBinding = GlobalKeybindPlanner.UserBinding
+
+    nonisolated static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.slimer", category: "settings")
 
     static let writeDebounce: TimeInterval = 0.3
 
-    /// The file being edited, or nil before ``load()``.
+    /// Keys whose effective value can't be read back through the C API.
+    static let unverifiableKeys: Set<String> = ["theme", "font-family", "keybind"]
+
+    /// The file being edited, or nil before ``load(url:synchronously:)``.
     @Published private(set) var file: GhosttyConfigFile?
     /// Desired managed values (canonical text), keyed by Ghostty key.
     @Published private(set) var managed: [String: [String]] = [:]
     /// The user's own settings outside the block, for showing current values.
     @Published private(set) var userSettings: [GhosttyConfigWriter.Setting] = []
-    /// Notes about the user's lines (overrides after the block, includes, …).
-    @Published private(set) var findings: [GhosttyConfigWriter.Finding] = []
+    /// Notes about the edited file's lines (overrides after the block, includes, …).
+    @Published private(set) var findings: [Finding] = []
+    /// Lines in other files loaded after the edited one that set a managed key.
+    @Published private(set) var otherFindings: [Finding] = []
     /// Per-action state of the managed global hotkeys.
     @Published private(set) var globalKeybinds: [ManagedGlobalAction: GlobalKeybindState] = [:]
-    /// The user's own global bindings for the managed actions.
-    @Published private(set) var userGlobalBindings: [GlobalKeybindPlanner.UserBinding] = []
-    /// User bindings Settings can't unbind (outside the recorder grammar or after the block).
-    @Published private(set) var leftActiveBindings: [GlobalKeybindPlanner.UserBinding] = []
+    /// The user's own global bindings for the managed actions (edited file).
+    @Published private(set) var userGlobalBindings: [UserBinding] = []
+    /// Global bindings for the managed actions in other default files and includes.
+    @Published private(set) var otherGlobalBindings: [UserBinding] = []
+    /// Bindings Settings can't unbind (outside the recorder grammar, after the block, or in
+    /// another file).
+    @Published private(set) var leftActiveBindings: [UserBinding] = []
     /// A read, write or block error. While set for a malformed block, nothing is written.
     @Published private(set) var fileError: String?
     /// Validation errors from the last edit, per key.
@@ -46,7 +62,20 @@ final class SettingsConfigStore: ObservableObject {
 
     private var pendingWrite: DispatchWorkItem?
     private var awaitingVerification: [String: [String]]?
-    private var configObserver: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
+    /// Whether the file existed when it was last read; if it did, a write never recreates it.
+    private var fileExisted = false
+    private var rawFindings: [Finding] = []
+    private var loadGeneration = 0
+    private let ioQueue = DispatchQueue(label: "top.mayhem.slimer.settings-io", qos: .userInitiated)
+
+    /// Overrides the config path (tests). Production re-resolves it on every load.
+    var explicitURL: URL?
+    /// The environment used to find Ghostty's default files (tests point it at a temp dir).
+    var environment: [String: String] = ProcessInfo.processInfo.environment
+    /// Ghostty's Application Support directory (`…/com.mitchellh.ghostty`); nil = the
+    /// user's. Tests point it at a temp dir.
+    var appSupportDirectory: URL?
 
     /// Injected for tests; defaults to the app's reload.
     var reloadConfig: () -> Void = {
@@ -60,20 +89,21 @@ final class SettingsConfigStore: ObservableObject {
 
     static let shared = SettingsConfigStore()
 
-    init() {
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .ghosttyConfigDidChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
+    /// - Parameter terminationNotification: posted when the app quits; pending edits are
+    ///   flushed then. Tests pass their own name.
+    init(terminationNotification: Notification.Name = NSApplication.willTerminateNotification) {
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: .ghosttyConfigDidChange, object: nil, queue: .main) { [weak self] notification in
             // Only app-level changes (object nil); surface-level ones are per-terminal.
             guard notification.object == nil,
                   let config = notification.userInfo?[Notification.Name.GhosttyConfigChangeKey] as? Ghostty.Config
             else { return }
-            MainActor.assumeIsolated {
-                self?.configDidReload(config)
-            }
-        }
+            MainActor.assumeIsolated { self?.configDidReload(config) }
+        })
+        observers.append(center.addObserver(forName: terminationNotification, object: nil, queue: .main) { [weak self] _ in
+            // Don't lose an edit made less than the debounce interval before quitting.
+            MainActor.assumeIsolated { self?.flush() }
+        })
     }
 
     // MARK: - Path
@@ -91,59 +121,90 @@ final class SettingsConfigStore: ObservableObject {
 
     // MARK: - Loading
 
-    /// Reads the file and Ghostty's state. Cheap; called when the window opens and after
-    /// each write.
-    func load(url: URL? = nil) {
-        if file == nil || url != nil {
-            guard let resolved = url ?? Self.resolveConfigURL() else {
-                fileError = "Couldn't find the Ghostty config file."
-                return
-            }
-            file = GhosttyConfigFile(url: resolved)
-        }
-        guard let file else { return }
-
-        do {
-            let text = try file.read()
-            try refresh(from: text)
-            fileError = nil
-        } catch {
-            fileError = String(describing: error)
+    /// Re-resolves the config path, then reads and parses the files off the main thread.
+    /// Called when the window opens or becomes key, and after each write.
+    func load(url: URL? = nil, synchronously: Bool = false) {
+        if let url { explicitURL = url }
+        guard let target = explicitURL ?? Self.resolveConfigURL() else {
+            fileError = "Couldn't find the Ghostty config file."
+            return
         }
         if let config = currentConfig() {
             diagnostics = config.errors
         }
+        loadGeneration += 1
+        let generation = loadGeneration
+        let environment = self.environment
+        let appSupport = appSupportDirectory
+        if synchronously {
+            apply(ioQueue.sync { ConfigScan.scan(url: target, environment: environment, appSupport: appSupport) })
+            return
+        }
+        ioQueue.async { [weak self] in
+            let scan = ConfigScan.scan(url: target, environment: environment, appSupport: appSupport)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, generation == self.loadGeneration else { return }
+                    self.apply(scan)
+                }
+            }
+        }
     }
 
-    private func refresh(from text: String) throws {
-        let entries = try GhosttyConfigWriter.managedEntries(in: text)
-        var managed: [String: [String]] = [:]
-        for entry in entries {
-            // `font-family = ""` resets the list; only the names matter here.
-            managed[entry.key] = entry.values.filter { !$0.isEmpty }
+    private func apply(_ scan: ConfigScan) {
+        file = scan.file
+        if let error = scan.error {
+            fileError = error
+            return
         }
-        let settings = try GhosttyConfigWriter.userSettings(in: text)
-        let bindings = try GlobalKeybindPlanner.userBindings(in: text)
-        self.userSettings = settings.before + settings.after
-        self.userGlobalBindings = bindings
+        fileError = nil
+        fileExisted = scan.snapshot?.stamp != nil
+        userSettings = scan.userSettings
+        userGlobalBindings = scan.userBindings
+        otherGlobalBindings = scan.otherBindings
+        otherFindings = scan.otherFindings
+        rawFindings = scan.findings
         // Edits still waiting for the debounce win over what's on disk.
         if !hasPendingWrite {
-            self.managed = managed
-            self.globalKeybinds = GlobalKeybindPlanner.states(
+            managed = scan.managed
+            globalKeybinds = GlobalKeybindPlanner.states(
                 managedValues: managed["keybind"] ?? [],
-                userBindings: bindings
+                userBindings: userGlobalBindings
             )
+            reconcileKeybinds()
         }
-        // Every key Settings can manage is checked, so a control can warn before the first
-        // edit. "Set before the block" is only worth saying for keys the block overrides.
-        let managedKeys = Set(self.managed.keys)
-        self.findings = try GhosttyConfigWriter.analyze(
-            text: text,
-            keys: Set(SettingsKeySpec.orderedKeys),
-            managedKeybinds: self.managed["keybind"] ?? [],
-            keybindActions: Set(ManagedGlobalAction.allCases.map(\.rawValue))
-        ).filter { $0.kind != .setBefore || managedKeys.contains($0.key) }
-        self.leftActiveBindings = GlobalKeybindPlanner.plan(states: globalKeybinds, userBindings: bindings).leftActive
+        recomputeDerived()
+    }
+
+    /// The block's keybinds must match what the planner would write for the current user
+    /// lines. If the user removed a line Slimer unbinds, the stale `global:<t>=unbind` would
+    /// remove an unrelated later binding on that trigger, so the block is rewritten.
+    private func reconcileKeybinds() {
+        let plan = GlobalKeybindPlanner.plan(states: globalKeybinds, userBindings: userGlobalBindings)
+        let current = managed["keybind"] ?? []
+        guard plan.values != current else { return }
+        Self.logger.info("rewriting Slimer's keybinds to match the current config")
+        setManagedKeybinds(plan.values)
+        globalKeybinds = GlobalKeybindPlanner.states(managedValues: plan.values, userBindings: userGlobalBindings)
+        scheduleWrite()
+    }
+
+    private func setManagedKeybinds(_ values: [String]) {
+        if values.isEmpty {
+            managed.removeValue(forKey: "keybind")
+        } else {
+            managed["keybind"] = values
+        }
+    }
+
+    private func recomputeDerived() {
+        // "Set before the block" only matters for keys the block overrides.
+        let managedKeys = Set(managed.keys)
+        findings = rawFindings.filter { $0.kind != .setBefore || managedKeys.contains($0.key) }
+        leftActiveBindings = GlobalKeybindPlanner.plan(
+            states: globalKeybinds,
+            userBindings: userGlobalBindings + otherGlobalBindings
+        ).leftActive
     }
 
     // MARK: - Reading values
@@ -160,14 +221,30 @@ final class SettingsConfigStore: ObservableObject {
 
     func isManaged(_ key: String) -> Bool { managed[key] != nil }
 
-    /// Findings that concern `key`.
-    func findings(for key: String) -> [GhosttyConfigWriter.Finding] {
-        findings.filter { $0.key == key }
+    /// Findings that concern `key`, in this file and in files loaded after it.
+    func findings(for key: String) -> [Finding] {
+        (findings + otherFindings).filter { $0.key == key }
     }
 
-    /// The key is overridden by a user line after the block, so editing it is pointless.
+    /// The key is overridden by a later line, so editing it is pointless.
     func isOverridden(_ key: String) -> Bool {
-        findings.contains { $0.key == key && $0.kind == .overriddenAfter }
+        findings(for: key).contains { $0.kind == .overriddenAfter }
+    }
+
+    /// `config-file` includes of the edited file.
+    var includeFindings: [Finding] { findings.filter { $0.kind == .include } }
+
+    /// A line too long for Ghostty before the block, if any.
+    var longLineFinding: Finding? { findings.first { $0.kind == .longLine } }
+
+    /// What to say about includes under `key`'s control, if the file has any.
+    func includeNote(for key: String) -> (text: String, isWarning: Bool)? {
+        guard !includeFindings.isEmpty else { return nil }
+        let names = includeFindings.map { "“\($0.value)”" }.joined(separator: ", ")
+        if Self.unverifiableKeys.contains(key) {
+            return ("Your config includes \(names), which load after it and could override this; Settings can't check \(key) after a reload.", true)
+        }
+        return ("Your config includes \(names), which load after it and win. If this doesn't apply, look there.", false)
     }
 
     // MARK: - Editing
@@ -180,6 +257,7 @@ final class SettingsConfigStore: ObservableObject {
             fieldErrors[key] = nil
             guard managed[key] != nil else { return }
             managed.removeValue(forKey: key)
+            recomputeDerived()
             scheduleWrite()
             return
         }
@@ -188,6 +266,7 @@ final class SettingsConfigStore: ObservableObject {
             fieldErrors[key] = nil
             guard managed[key] != [canonical] else { return }
             managed[key] = [canonical]
+            recomputeDerived()
             scheduleWrite()
         case .failure(let error):
             fieldErrors[key] = error.description
@@ -195,19 +274,15 @@ final class SettingsConfigStore: ObservableObject {
     }
 
     func setGlobalKeybind(_ action: ManagedGlobalAction, _ state: GlobalKeybindState) {
-        if case .set(let trigger) = state, !KeyTrigger.isValid(trigger, requireModifier: true) {
-            fieldErrors["keybind"] = "\(KeyTrigger.displayString(trigger)) can't be a global hotkey; add a modifier."
+        if case .set(let trigger) = state, let error = KeyTrigger.globalHotkeyError(trigger) {
+            fieldErrors["keybind"] = error
             return
         }
         fieldErrors["keybind"] = nil
         globalKeybinds[action] = state
         let plan = GlobalKeybindPlanner.plan(states: globalKeybinds, userBindings: userGlobalBindings)
-        leftActiveBindings = plan.leftActive
-        if plan.values.isEmpty {
-            managed.removeValue(forKey: "keybind")
-        } else {
-            managed["keybind"] = plan.values
-        }
+        setManagedKeybinds(plan.values)
+        recomputeDerived()
         scheduleWrite()
     }
 
@@ -228,7 +303,7 @@ final class SettingsConfigStore: ObservableObject {
         pendingWrite?.cancel()
         hasPendingWrite = true
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.flush() }
+            MainActor.assumeIsolated { self?.flushInBackground() }
         }
         pendingWrite = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.writeDebounce, execute: work)
@@ -246,42 +321,84 @@ final class SettingsConfigStore: ObservableObject {
         }
     }
 
-    /// Writes pending edits now (also called when the window closes).
+    /// Writes pending edits now and waits for the write (window close, app quit, tests).
     func flush() {
-        pendingWrite?.cancel()
-        pendingWrite = nil
-        guard hasPendingWrite else { return }
-        hasPendingWrite = false
-        guard let file else { return }
+        guard let job = takePendingJob() else { return }
+        let outcome = ioQueue.sync { Self.performWrite(job) }
+        finishWrite(outcome, synchronously: true)
+    }
 
-        let current: String
-        let rendered: String
-        do {
-            // Always start from what's on disk now, so concurrent hand edits survive.
-            current = try file.read()
-            rendered = try GhosttyConfigWriter.render(text: current, entries: entries())
-        } catch {
-            fileError = String(describing: error)
-            Self.logger.error("not writing config: \(String(describing: error), privacy: .public)")
-            return
-        }
-
-        if rendered != current {
-            do {
-                let firstWrite = (try? GhosttyConfigWriter.blockRange(in: GhosttyConfigWriter.split(current).lines)) == nil
-                try file.write(rendered, backup: firstWrite)
-                lastWrite = Date()
-                fileError = nil
-            } catch {
-                fileError = String(describing: error)
-                Self.logger.error("config write failed: \(String(describing: error), privacy: .public)")
-                return
+    /// The debounced path: the write happens on the I/O queue.
+    private func flushInBackground() {
+        guard let job = takePendingJob() else { return }
+        ioQueue.async {
+            let outcome = Self.performWrite(job)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { [weak self] in self?.finishWrite(outcome, synchronously: false) }
             }
         }
+    }
 
-        try? refresh(from: rendered)
+    struct WriteJob {
+        var file: GhosttyConfigFile
+        var entries: [GhosttyConfigWriter.Entry]
+        var fileExisted: Bool
+    }
+
+    struct WriteOutcome: Equatable {
+        var wrote = false
+        var error: String?
+    }
+
+    private func takePendingJob() -> WriteJob? {
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        guard hasPendingWrite else { return nil }
+        hasPendingWrite = false
+        guard let file else { return nil }
         awaitingVerification = managed
-        reloadConfig()
+        return WriteJob(file: file, entries: entries(), fileExisted: fileExisted)
+    }
+
+    /// Re-reads, renders and writes. Retries once if the file changes between the read and
+    /// the rename. Never recreates a file that existed when Settings last read it.
+    nonisolated static func performWrite(_ job: WriteJob) -> WriteOutcome {
+        for attempt in 0 ..< 2 {
+            do {
+                let snapshot = try job.file.readSnapshot()
+                if snapshot.stamp == nil && job.fileExisted {
+                    throw GhosttyConfigFile.FileError.vanished(job.file.targetURL.path)
+                }
+                let lines = GhosttyConfigWriter.split(snapshot.text)
+                let rendered = try GhosttyConfigWriter.render(lines: lines, entries: job.entries, owns: SettingsKeySpec.owns)
+                guard rendered != snapshot.text else { return WriteOutcome() }
+                let addsBlock = try GhosttyConfigWriter.blockRange(in: lines.contents) == nil
+                try job.file.write(rendered, expected: snapshot.stamp, backup: addsBlock)
+                return WriteOutcome(wrote: true)
+            } catch GhosttyConfigFile.FileError.changedOnDisk(_) where attempt == 0 {
+                continue
+            } catch {
+                logger.error("config write failed: \(String(describing: error), privacy: .public)")
+                return WriteOutcome(error: String(describing: error))
+            }
+        }
+        return WriteOutcome(error: "The config kept changing while Settings was saving; nothing was written.")
+    }
+
+    private func finishWrite(_ outcome: WriteOutcome, synchronously: Bool) {
+        if let error = outcome.error {
+            fileError = error
+            awaitingVerification = nil
+            return
+        }
+        fileError = nil
+        if outcome.wrote {
+            lastWrite = Date()
+            reloadConfig()
+        } else {
+            awaitingVerification = nil
+        }
+        load(synchronously: synchronously)
     }
 
     // MARK: - Verification

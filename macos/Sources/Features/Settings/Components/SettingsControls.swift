@@ -23,6 +23,10 @@ struct ConfigKeyStatus: View {
             ForEach(store.findings(for: key)) { finding in
                 FindingLabel(finding: finding)
             }
+            if let note = store.includeNote(for: key) {
+                Label(note.text, systemImage: note.isWarning ? "exclamationmark.triangle.fill" : "info.circle")
+                    .foregroundColor(note.isWarning ? .orange : .secondary)
+            }
             if store.isManaged(key) {
                 Button("Use value from my config") { store.set(key, nil) }
                     .buttonStyle(.link)
@@ -42,6 +46,8 @@ struct FindingLabel: View {
             Label(finding.message, systemImage: "exclamationmark.triangle.fill").foregroundColor(.orange)
         case .addsAfter, .include:
             Label(finding.message, systemImage: "info.circle").foregroundColor(.secondary)
+        case .longLine:
+            Label(finding.message, systemImage: "xmark.octagon.fill").foregroundColor(.red)
         case .setBefore:
             Label(finding.message, systemImage: "info.circle").foregroundColor(.secondary)
         }
@@ -194,6 +200,9 @@ struct ConfigFileBanner: View {
     var body: some View {
         if let error = store.fileError {
             SettingsBanner(style: .error, text: error)
+        }
+        if let finding = store.longLineFinding {
+            SettingsBanner(style: .error, text: finding.message)
         }
     }
 }

@@ -65,6 +65,22 @@ struct KeyTriggerTests {
         #expect(!KeyTrigger.isValidWorkspaceShortcut("f5"))
     }
 
+    @Test func globalHotkeysDenyStandardShortcuts() {
+        for denied in ["cmd+c", "cmd+v", "cmd+x", "cmd+z", "cmd+a", "cmd+s", "cmd+w", "cmd+q", "cmd+n",
+                       "cmd+t", "cmd+f", "cmd+h", "cmd+m", "cmd+tab", "cmd+space", "cmd+comma",
+                       "cmd+shift+z", "cmd+shift+tab", "cmd+alt+escape", "ctrl+space", "ctrl+arrow_left",
+                       "ctrl+shift+space", "a", "backquote"] {
+            #expect(KeyTrigger.globalHotkeyError(denied) != nil, "\(denied)")
+            #expect(ManagedGlobalAction.newWindow.keybindValue(trigger: denied) == nil, "\(denied)")
+            #expect((try? SettingsValidator.validate(key: "keybind", value: "global:\(denied)=new_window").get()) == nil)
+        }
+        for allowed in ["cmd+backquote", "cmd+shift+n", "cmd+alt+t", "ctrl+backquote", "f12", "cmd+f1", "ctrl+alt+space"] {
+            #expect(KeyTrigger.globalHotkeyError(allowed) == nil, "\(allowed)")
+        }
+        // Unbinds aren't hotkeys, so any grammar trigger can be unbound.
+        #expect((try? SettingsValidator.validate(key: "keybind", value: "global:cmd+c=unbind").get()) == "global:cmd+c=unbind")
+    }
+
     @Test func displayString() {
         #expect(KeyTrigger.displayString("cmd+shift+backquote") == "⇧⌘`")
         #expect(KeyTrigger.displayString("ctrl+alt+k") == "⌃⌥K")
@@ -220,8 +236,8 @@ struct GlobalKeybindPlannerTests {
         let text = "\(begin)\n\(end)\nkeybind = global:cmd+k=new_window\n"
         let users = try GlobalKeybindPlanner.userBindings(in: text)
         #expect(users.first?.afterBlock == true)
-        let plan = GlobalKeybindPlanner.plan(states: [.newWindow: .set("cmd+j")], userBindings: users)
-        #expect(plan.values == ["global:cmd+j=new_window"])
+        let plan = GlobalKeybindPlanner.plan(states: [.newWindow: .set("cmd+shift+j")], userBindings: users)
+        #expect(plan.values == ["global:cmd+shift+j=new_window"])
         #expect(plan.leftActive.count == 1)
     }
 

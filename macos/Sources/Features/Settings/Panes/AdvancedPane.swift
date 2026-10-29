@@ -19,8 +19,8 @@ struct AdvancedPane: View {
                         Text(file.targetURL.path).textSelection(.enabled)
                     }
                 }
-                if let backup = store.file?.backupURL, FileManager.default.fileExists(atPath: backup.path) {
-                    LabeledContent("Backup") {
+                if let backup = store.file?.backups().last {
+                    LabeledContent("Latest backup") {
                         Text(backup.path).textSelection(.enabled)
                     }
                 }

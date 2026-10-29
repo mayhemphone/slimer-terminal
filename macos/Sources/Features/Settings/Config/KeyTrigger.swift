@@ -112,6 +112,40 @@ enum KeyTrigger {
         return true
     }
 
+    /// Why `trigger` can't be a global hotkey, or nil if it can. A global hotkey takes the
+    /// key from every app, so it must have a modifier (or be an F-key) and must not be one of
+    /// the standard system or editing shortcuts: ⌘ plus a single letter, ⌘Tab, ⌘Space,
+    /// ⌘, ⌘. ⇧⌘Z ⇧⌘Tab ⌥⌘Esc, ⌃Space, ⌃⇧Space and ⌃+arrows (Mission Control).
+    /// ⌘` stays allowed: it is the drawer's suggested default.
+    static func globalHotkeyError(_ trigger: String) -> String? {
+        guard isValid(trigger, requireModifier: true) else {
+            return "Global hotkeys need a modifier (or an F-key)."
+        }
+        let parts = trigger.split(separator: "+").map(String.init)
+        guard let key = parts.last else { return "Not a shortcut." }
+        let mods = Set(parts.dropLast())
+        let isLetter = key.count == 1 && key.unicodeScalars.first.map { ("a"..."z").contains($0) } == true
+        let conflict: Bool
+        switch mods {
+        case ["cmd"]:
+            conflict = isLetter || ["tab", "space", "comma", "period"].contains(key)
+        case ["cmd", "shift"]:
+            conflict = key == "z" || key == "tab"
+        case ["cmd", "alt"]:
+            conflict = key == "escape" || key == "space"
+        case ["ctrl"]:
+            conflict = key == "space" || ["arrow_up", "arrow_down", "arrow_left", "arrow_right"].contains(key)
+        case ["ctrl", "shift"]:
+            conflict = key == "space"
+        default:
+            conflict = false
+        }
+        guard !conflict else {
+            return "\(displayString(trigger)) is a standard system or editing shortcut; a global hotkey would take it from every app."
+        }
+        return nil
+    }
+
     /// Whether `trigger` is usable as a Workspace shortcut (see `WorkspaceShortcut`): it
     /// must contain `cmd` and parse with the Workspace parser.
     static func isValidWorkspaceShortcut(_ trigger: String) -> Bool {
@@ -163,7 +197,7 @@ enum ManagedGlobalAction: String, CaseIterable, Identifiable {
 
     /// `global:<trigger>=<action>`, or nil when the trigger isn't valid.
     func keybindValue(trigger: String) -> String? {
-        guard KeyTrigger.isValid(trigger, requireModifier: true) else { return nil }
+        guard KeyTrigger.globalHotkeyError(trigger) == nil else { return nil }
         return "global:\(trigger)=\(rawValue)"
     }
 }

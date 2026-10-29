@@ -25,24 +25,53 @@ enum GlobalKeybindPlanner {
         var trigger: String
         /// Whether the binding comes after the managed block (Settings can't override it).
         var afterBlock: Bool
+        /// Another config file the binding is in (another default file or an include);
+        /// nil for the file Settings edits. Settings never unbinds those.
+        var file: String?
 
-        /// The trigger can be echoed into the block only when it is in the recorder grammar.
-        var isUnbindable: Bool { !afterBlock && KeyTrigger.isValid(trigger) }
+        init(line: Int, action: ManagedGlobalAction, trigger: String, afterBlock: Bool, file: String? = nil) {
+            self.line = line
+            self.action = action
+            self.trigger = trigger
+            self.afterBlock = afterBlock
+            self.file = file
+        }
+
+        /// The trigger can be echoed into the block only when it is in the recorder grammar
+        /// and the line comes before the block in the same file.
+        var isUnbindable: Bool { file == nil && !afterBlock && KeyTrigger.isValid(trigger) }
+
+        /// "line 3" or "~/.config/ghostty/extra line 3".
+        var location: String {
+            guard let file else { return "Line \(line) of your config" }
+            return "\((file as NSString).abbreviatingWithTildeInPath) line \(line)"
+        }
     }
 
     /// The user's `global:` bindings (outside the block) for the managed actions.
     static func userBindings(in text: String) throws -> [UserBinding] {
-        let settings = try GhosttyConfigWriter.userSettings(in: text)
-        func collect(_ list: [GhosttyConfigWriter.Setting], after: Bool) -> [UserBinding] {
-            list.compactMap { setting in
-                guard setting.key == "keybind",
-                      let bind = KeybindValue(parsing: setting.value),
-                      bind.prefixes.contains("global"),
-                      let action = ManagedGlobalAction(rawValue: bind.action) else { return nil }
-                return UserBinding(line: setting.line, action: action, trigger: bind.normalizedTrigger, afterBlock: after)
-            }
+        try userBindings(lines: GhosttyConfigWriter.split(text))
+    }
+
+    static func userBindings(lines: GhosttyConfigWriter.Lines) throws -> [UserBinding] {
+        let settings = try GhosttyConfigWriter.userSettings(lines: lines)
+        return bindings(in: settings.before, afterBlock: false) + bindings(in: settings.after, afterBlock: true)
+    }
+
+    /// Global bindings of the managed actions among `settings`.
+    static func bindings(
+        in settings: [GhosttyConfigWriter.Setting],
+        afterBlock: Bool,
+        file: String? = nil
+    ) -> [UserBinding] {
+        settings.compactMap { setting in
+            guard setting.key == "keybind",
+                  let bind = KeybindValue(parsing: setting.value),
+                  bind.prefixes.contains("global"),
+                  let action = ManagedGlobalAction(rawValue: bind.action) else { return nil }
+            return UserBinding(line: setting.line, action: action, trigger: bind.normalizedTrigger,
+                               afterBlock: afterBlock, file: file)
         }
-        return collect(settings.before, after: false) + collect(settings.after, after: true)
     }
 
     /// Reads the per-action state back from the block's `keybind` values.

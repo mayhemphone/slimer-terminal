@@ -23,7 +23,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.toolbarStyle = .unified
         super.init(window: window)
         window.delegate = self
-        window.contentViewController = NSHostingController(rootView: SettingsView(config: store))
+        window.contentViewController = NSHostingController(rootView: SlimerSettingsView(config: store))
         window.center()
     }
 

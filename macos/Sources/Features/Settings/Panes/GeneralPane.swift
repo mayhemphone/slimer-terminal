@@ -21,9 +21,14 @@ struct GeneralPane: View {
                 ForEach(store.findings(for: "keybind")) { finding in
                     FindingLabel(finding: finding).font(.caption)
                 }
-                ForEach(store.leftActiveBindings, id: \.line) { binding in
+                if let note = store.includeNote(for: "keybind") {
+                    Label(note.text, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                ForEach(store.leftActiveBindings, id: \.location) { binding in
                     Label(
-                        "Line \(binding.line) of your config still binds \(KeyTrigger.displayString(binding.trigger)) to \(binding.action.title.lowercased()); Settings can't remove it.",
+                        "\(binding.location) still binds \(KeyTrigger.displayString(binding.trigger)) to \(binding.action.title.lowercased()); Settings can't remove it.",
                         systemImage: "info.circle"
                     )
                     .font(.caption)
@@ -94,11 +99,7 @@ struct GeneralPane: View {
                     }
                 },
                 placeholder: "None",
-                validate: { trigger in
-                    KeyTrigger.isValid(trigger, requireModifier: true)
-                        ? nil
-                        : "Global hotkeys need a modifier (or an F-key)."
-                }
+                validate: { KeyTrigger.globalHotkeyError($0) }
             )
         }
     }
