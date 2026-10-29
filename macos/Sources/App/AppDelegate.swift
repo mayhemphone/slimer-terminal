@@ -251,6 +251,7 @@ class AppDelegate: NSObject,
         _ = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown],
             handler: localEventHandler)
+        ShortcutOverlayController.shared.install(config: ghostty.config) // slimer: hold-modifier shortcut sheet
 
         // Notifications
         NotificationCenter.default.addObserver(
