@@ -1,27 +1,47 @@
-//! Slimer autocomplete: surface-side state and the accept wire format.
+//! Slimer autocomplete: the report gate, surface-side state and the
+//! accept wire format.
 //!
 //! The OSC 7704 parser lives in the terminal module
 //! (`terminal/osc/parsers/autocomplete_buffer.zig`). This module owns
-//! everything after the parser: the message payload that crosses from the
-//! IO thread to the surface, the surface-owned copy of the last accepted
-//! buffer, the rate limiter, and the validation and encoding of text the
-//! app sends back to the shell with `CSI 7705 ~`.
+//! everything after the parser: the IO-thread gate (`Gate`), the message
+//! payload that crosses from the IO thread to the surface (`Update`), the
+//! surface-owned copy of the last accepted buffer (`State`), and the
+//! validation and encoding of text the app sends back to the shell.
 //!
-//! Security model, in one place:
+//! Security model, in one place (see docs/slimer/AUTOCOMPLETE.md):
 //!
 //! - The reported buffer is untrusted data. It is length-capped by the
-//!   parser, gated by the surface (shell integration seen, prompt input
-//!   state, rate limit), stored as bytes, and only ever read back through
-//!   the C API. Nothing here interprets or executes it.
+//!   parser and gated on the IO thread, in stream order: the report must
+//!   carry the per-surface secret (`n=`, the shell got it through
+//!   `SLIMER_AUTOCOMPLETE_TOKEN` and unset it), the terminal must be in
+//!   the prompt-input state on the primary screen, and the rate limit
+//!   must hold. It is stored as bytes and only read back through the C
+//!   API. Nothing here interprets or executes it.
+//! - Accepting is gated too (`Surface.autocompleteAccept`): the state must
+//!   be live, the generation must match the popup's, the terminal must
+//!   still be at prompt input, and the pty's foreground process group must
+//!   be the shell that reported (`p=`). Enter, ^C, ^D and ^Z typed by the
+//!   user clear the state synchronously.
 //! - Text accepted from the app is rejected, not stripped, if it contains
-//!   control characters, DEL, invalid UTF-8, C1 controls, U+2028/2029 or
-//!   bidi overrides, or if it is longer than `max_accept_bytes`. The
-//!   shell widget shell-quotes it again before inserting, and the widget
-//!   computes the replaced range itself, so the terminal can never cause
-//!   over-deletion or execution.
+//!   control characters, invalid UTF-8, or code points in the Unicode
+//!   categories Cf, Zl, Zp, Cs, Cn or Co, or noncharacters, or if it is
+//!   longer than `max_accept_bytes`. On the wire every byte is hex
+//!   encoded, so if the shell widget is not reached the bytes that leak
+//!   as keystrokes are only `%`, digits and `A`-`F`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const uucode = @import("uucode");
+
+pub const Engine = @import("Engine.zig");
+pub const Spec = @import("Spec.zig");
+pub const Tokenizer = @import("Tokenizer.zig");
+pub const History = @import("History.zig");
+
+/// Glue between the core surface and the shared engine. Only analyzed
+/// when referenced (it pulls in global state).
+pub const glue = @import("glue.zig");
 
 /// The longest decoded buffer the surface stores. Matches the parser's
 /// `max_buffer_bytes` and the shell-side truncation cap.
@@ -32,6 +52,12 @@ pub const max_accept_bytes = 4096;
 
 /// How many accepted reports a surface takes per second before dropping.
 pub const rate_limit_per_second = 200;
+
+/// Length of the per-surface secret in hex characters (128 bits).
+pub const token_hex_len = 32;
+
+/// Environment variable that carries the secret to the shell.
+pub const token_env = "SLIMER_AUTOCOMPLETE_TOKEN";
 
 /// Sync with `GHOSTTY_AUTOCOMPLETE_KEYMAP_*` in ghostty.h.
 pub const Keymap = enum(u8) {
@@ -45,67 +71,71 @@ pub const Keymap = enum(u8) {
     }
 };
 
-/// The payload of the `autocomplete_buffer` surface message. Built on the
-/// IO thread from the parser's borrowed slices and freed by the surface.
-pub const Update = struct {
-    alloc: Allocator,
-    /// Percent-decoded buffer, owned.
-    buffer: []u8,
-    cursor: u32,
-    keymap: Keymap,
-    truncated: bool,
+/// A per-surface secret the shell must echo in every report.
+pub const Token = struct {
+    hex: [token_hex_len]u8,
 
-    pub fn init(
-        alloc: Allocator,
-        buffer: []const u8,
-        cursor: u32,
-        keymap_name: []const u8,
-        truncated: bool,
-    ) Allocator.Error!Update {
-        return .{
-            .alloc = alloc,
-            .buffer = try alloc.dupe(u8, buffer),
-            .cursor = cursor,
-            .keymap = .fromName(keymap_name),
-            .truncated = truncated,
-        };
+    pub fn random(io: std.Io) Token {
+        var bytes: [token_hex_len / 2]u8 = undefined;
+        io.random(&bytes);
+        var t: Token = undefined;
+        _ = std.fmt.bufPrint(&t.hex, "{x}", .{&bytes}) catch unreachable;
+        return t;
     }
 
-    pub fn deinit(self: *const Update) void {
-        self.alloc.free(self.buffer);
+    /// Constant-time comparison against a reported value.
+    pub fn matches(self: *const Token, reported: []const u8) bool {
+        if (reported.len != token_hex_len) return false;
+        var diff: u8 = 0;
+        for (self.hex, reported[0..token_hex_len]) |a, b| diff |= a ^ b;
+        return diff == 0;
     }
 };
 
-/// Surface-owned autocomplete state. The surface is the only writer and
-/// readers go through the surface (the app thread), so no locking.
-pub const State = struct {
-    /// The last accepted buffer, owned. Valid until the next `set` or
-    /// `clear`, which is what the C API documents to callers.
-    buffer: []u8 = &.{},
-    cursor: u32 = 0,
-    keymap: Keymap = .other,
-
-    /// True between a `set` and the next `clear`. The C API reports
-    /// false when nothing is live so the app can hide its popup.
-    active: bool = false,
-
-    /// Bumped on every change so the app can tell stale popups apart.
-    generation: u64 = 0,
+/// The IO-thread gate for OSC 7704 reports. Owned by the stream handler,
+/// which processes output in order and holds the terminal lock, so the
+/// prompt-input check sees exactly the state the report was written in.
+pub const Gate = struct {
+    /// The surface's secret. Null means autocomplete reports are never
+    /// accepted (no token was handed to the shell).
+    token: ?Token = null,
 
     /// Fixed-window rate limiter.
     window_start: ?std.Io.Timestamp = null,
     window_count: u32 = 0,
 
-    pub fn deinit(self: *State, alloc: Allocator) void {
-        alloc.free(self.buffer);
-        self.* = .{};
+    /// True if a report was forwarded since the last deactivate, so
+    /// prompt marks only post a deactivate when something is live.
+    live: bool = false,
+
+    pub const Verdict = enum { accept, bad_token, not_at_input, rate_limited };
+
+    /// Terminal facts the caller reads under the terminal lock.
+    pub const TerminalState = struct {
+        primary_screen: bool,
+        shell_integration_seen: bool,
+        at_input: bool,
+    };
+
+    pub fn check(
+        self: *Gate,
+        nonce: []const u8,
+        term: TerminalState,
+        now: std.Io.Timestamp,
+    ) Verdict {
+        const token = &(self.token orelse return .bad_token);
+        if (!token.matches(nonce)) return .bad_token;
+        if (!term.primary_screen or !term.shell_integration_seen or !term.at_input)
+            return .not_at_input;
+        if (!self.admit(now)) return .rate_limited;
+        return .accept;
     }
 
     /// Returns true if a report arriving at `now` is within the rate
     /// limit and counts it. A fixed one-second window is enough here: the
     /// goal is to bound work from a hostile or runaway shell, not to
     /// shape traffic precisely.
-    pub fn admit(self: *State, now: std.Io.Timestamp) bool {
+    pub fn admit(self: *Gate, now: std.Io.Timestamp) bool {
         if (self.window_start) |start| {
             if (start.durationTo(now).toMilliseconds() < 1000) {
                 if (self.window_count >= rate_limit_per_second) return false;
@@ -117,57 +147,225 @@ pub const State = struct {
         self.window_count = 1;
         return true;
     }
+};
 
-    /// Copy `update` into the stored state and bump the generation. The
-    /// update's own buffer is left for the caller to free. The cursor is
-    /// clamped to the buffer.
-    pub fn set(self: *State, alloc: Allocator, update: Update) Allocator.Error!void {
-        const copy = try alloc.dupe(u8, update.buffer);
+/// The payload of the `autocomplete_buffer` surface message. Built on the
+/// IO thread after the gate passes; the surface takes ownership of the
+/// buffer (`State.take`) or frees it (`deinit`).
+pub const Update = struct {
+    alloc: Allocator,
+    /// Percent-decoded buffer, owned. Empty for a deactivate.
+    buffer: []u8,
+    cursor: u32,
+    keymap: Keymap,
+    truncated: bool,
+    /// The shell's process group (`p=`), compared with the pty's
+    /// foreground group before accepting.
+    pgid: u32,
+    /// Set for an update that only ends the live state.
+    deactivate: ?Deactivate = null,
+
+    pub const Deactivate = enum {
+        /// The shell left the line editor (zle `line-finish`, `d=1`): the
+        /// line may be about to run, so keep it until OSC 133 C records
+        /// it to history.
+        line_finish,
+        /// A prompt mark (133 A/D) or the alternate screen: forget
+        /// everything, including a line waiting to be recorded.
+        reset,
+    };
+
+    pub fn init(
+        alloc: Allocator,
+        buffer: []const u8,
+        cursor: u32,
+        keymap_name: []const u8,
+        truncated: bool,
+        pgid: u32,
+    ) Allocator.Error!Update {
+        return .{
+            .alloc = alloc,
+            .buffer = try alloc.dupe(u8, buffer),
+            .cursor = cursor,
+            .keymap = .fromName(keymap_name),
+            .truncated = truncated,
+            .pgid = pgid,
+        };
+    }
+
+    /// An update that only ends the surface state.
+    pub fn deactivation(alloc: Allocator, kind: Deactivate) Update {
+        return .{
+            .alloc = alloc,
+            .buffer = &.{},
+            .cursor = 0,
+            .keymap = .other,
+            .truncated = false,
+            .pgid = 0,
+            .deactivate = kind,
+        };
+    }
+
+    pub fn deinit(self: *const Update) void {
+        self.alloc.free(self.buffer);
+    }
+};
+
+/// Surface-owned autocomplete state. The surface is the only writer and
+/// readers go through the surface (the app thread), so no locking.
+pub const State = struct {
+    /// The last accepted buffer, owned. Valid until the next `take` or
+    /// `clear`, which is what the C API documents to callers.
+    buffer: []u8 = &.{},
+    cursor: u32 = 0,
+    keymap: Keymap = .other,
+    pgid: u32 = 0,
+
+    /// The shell truncated the buffer; never recorded to history.
+    truncated: bool = false,
+
+    /// The line the user submitted (stashed on Enter or zle line-finish),
+    /// owned, waiting for OSC 133 C to record it to history. Empty when
+    /// none. Never a truncated buffer.
+    pending: []u8 = &.{},
+
+    /// Strings of the last query result, owned by the surface until the
+    /// next query (the engine's own scratch memory is shared).
+    query_arena: ?std.heap.ArenaAllocator = null,
+
+    /// True between a `take` and the next `clear`. The C API reports
+    /// false when nothing is live so the app can hide its popup.
+    active: bool = false,
+
+    /// Bumped on every change so the app can tell stale popups apart.
+    generation: u64 = 0,
+
+    pub fn deinit(self: *State, alloc: Allocator) void {
         alloc.free(self.buffer);
-        self.buffer = copy;
+        alloc.free(self.pending);
+        if (self.query_arena) |*a| a.deinit();
+        self.* = .{};
+    }
+
+    /// The arena for a new query result, reset from the previous one.
+    pub fn resetQueryArena(self: *State, alloc: Allocator) Allocator {
+        if (self.query_arena) |*a| {
+            _ = a.reset(.retain_capacity);
+        } else {
+            self.query_arena = .init(alloc);
+        }
+        return self.query_arena.?.allocator();
+    }
+
+    /// Take ownership of `update`'s buffer and bump the generation. The
+    /// update must have been allocated with `alloc` and must not be
+    /// freed afterwards. The cursor is clamped to the buffer.
+    pub fn take(self: *State, alloc: Allocator, update: Update) void {
+        std.debug.assert(update.deactivate == null);
+        alloc.free(self.buffer);
+        self.buffer = update.buffer;
         self.cursor = @intCast(@min(update.cursor, self.buffer.len));
         self.keymap = update.keymap;
+        self.truncated = update.truncated;
+        self.pgid = update.pgid;
         self.active = true;
         self.generation +%= 1;
     }
 
-    /// Forget the buffer and bump the generation. Used on dismiss and
-    /// whenever the popup must go away.
+    /// End the live state but keep the line as `pending` for history.
+    /// Does nothing if nothing is live.
+    pub fn stash(self: *State, alloc: Allocator) void {
+        if (!self.active) return;
+        alloc.free(self.pending);
+        if (self.truncated) {
+            alloc.free(self.buffer);
+            self.pending = &.{};
+        } else {
+            self.pending = self.buffer;
+        }
+        self.buffer = &.{};
+        self.cursor = 0;
+        self.truncated = false;
+        self.pgid = 0;
+        self.active = false;
+        self.generation +%= 1;
+    }
+
+    /// Take ownership of the pending line, if any.
+    pub fn takePending(self: *State) []u8 {
+        const p = self.pending;
+        self.pending = &.{};
+        return p;
+    }
+
+    /// Forget the buffer and any pending line and bump the generation.
+    /// Used on dismiss and whenever the popup must go away.
     pub fn clear(self: *State, alloc: Allocator) void {
+        alloc.free(self.pending);
+        self.pending = &.{};
         alloc.free(self.buffer);
         self.buffer = &.{};
         self.cursor = 0;
+        self.truncated = false;
+        self.pgid = 0;
         self.active = false;
         self.generation +%= 1;
     }
 };
 
+/// Returns true if the bytes a key press writes to the pty end or
+/// interrupt the line being edited: CR, LF, ^C, ^D or ^Z anywhere in the
+/// encoding. The surface clears the state synchronously on these so a
+/// fast Enter-then-Tab can't accept into the command that just started.
+pub fn endsLine(encoded: []const u8) bool {
+    for (encoded) |c| switch (c) {
+        '\r', '\n', 0x03, 0x04, 0x1a => return true,
+        else => {},
+    };
+    return false;
+}
+
 /// Returns true if `text` may be sent to the shell as a replacement.
-/// Rejects anything that could act as input other than plain text: C0
-/// controls (so no newline, ESC, BEL, tab), DEL, invalid UTF-8, C1
-/// controls, line and paragraph separators, and bidi override/isolate
-/// characters that could disguise what gets inserted.
+/// Rejects anything that could act as input other than plain text or
+/// disguise what gets inserted: C0 and C1 controls (so no newline, ESC,
+/// BEL, tab), DEL, invalid UTF-8, the Unicode categories Cf (format:
+/// bidi controls, zero-width characters), Zl, Zp, Cs, Cn (unassigned) and
+/// Co (private use), and noncharacters.
 pub fn isSafeAcceptText(text: []const u8) bool {
     if (text.len == 0 or text.len > max_accept_bytes) return false;
 
     const view = std.unicode.Utf8View.init(text) catch return false;
     var it = view.iterator();
-    while (it.nextCodepoint()) |cp| switch (cp) {
-        0x00...0x1F,
-        0x7F,
-        0x80...0x9F,
-        0x2028,
-        0x2029,
-        0x202A...0x202E,
-        0x2066...0x2069,
-        => return false,
-        else => {},
-    };
+    while (it.nextCodepoint()) |cp| {
+        if (!isSafeCodepoint(cp)) return false;
+    }
     return true;
 }
 
-/// Returns true if `c` must be percent-encoded on the wire, in either
-/// direction. Mirrors the shell script's encoder exactly.
+fn isSafeCodepoint(cp: u21) bool {
+    switch (cp) {
+        0x00...0x1F, 0x7F...0x9F => return false,
+        // Noncharacters: U+FDD0..U+FDEF and the last two of every plane.
+        0xFDD0...0xFDEF => return false,
+        else => {},
+    }
+    if ((cp & 0xFFFE) == 0xFFFE) return false;
+    // ASCII printable is always fine; skip the table lookup.
+    if (cp < 0x80) return true;
+    return switch (uucode.get(.general_category, cp)) {
+        .other_format,
+        .separator_line,
+        .separator_paragraph,
+        .other_surrogate,
+        .other_not_assigned,
+        .other_private_use,
+        => false,
+        else => true,
+    };
+}
+
+/// Returns true if `c` must be percent-encoded in a buffer report.
+/// Mirrors the shell script's encoder exactly.
 pub fn needsPercent(c: u8) bool {
     return switch (c) {
         '%', ';', 0x00...0x1F, 0x7F => true,
@@ -176,7 +374,8 @@ pub fn needsPercent(c: u8) bool {
 }
 
 /// Percent-encode `text` the way the shell does: `%`, `;`, C0 controls
-/// and DEL become `%XX` with uppercase hex; everything else is raw.
+/// and DEL become `%XX` with uppercase hex; everything else is raw. Used
+/// for the history log.
 pub fn percentEncode(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     for (text) |c| {
         if (needsPercent(c)) {
@@ -187,14 +386,38 @@ pub fn percentEncode(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Err
     }
 }
 
-/// Write the accept sequence for `text`: `CSI 7705 ~`, the
-/// percent-encoded text, then BEL. The shell widget bound to
-/// `CSI 7705 ~` reads up to the BEL. The caller must have checked the
-/// text with `isSafeAcceptText`.
-pub fn writeAcceptSequence(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+/// Hex-encode every byte as `%XX` (uppercase). Used for the accept
+/// payload so stray bytes that reach zle as keystrokes are harmless.
+pub fn percentEncodeAll(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    for (text) |c| try writer.print("%{X:0>2}", .{c});
+}
+
+/// What an accepted completion replaces in the shell.
+pub const AcceptMode = enum {
+    /// The current token (`CSI 7705 ~`). The widget finds the token and
+    /// shell-quotes the text.
+    token,
+    /// The whole line (`CSI 7706 ~`), for history suggestions. The widget
+    /// inserts the text unquoted, and only if the cursor is at the end
+    /// and the current line is a prefix of the text.
+    line,
+
+    fn csi(self: AcceptMode) []const u8 {
+        return switch (self) {
+            .token => "\x1b[7705~",
+            .line => "\x1b[7706~",
+        };
+    }
+};
+
+/// Write the accept sequence for `text`: `CSI 7705 ~` (or 7706 for a
+/// line), every byte of the text as `%XX`, then BEL. The shell widget
+/// bound to the CSI reads up to the BEL. The caller must have checked
+/// the text with `isSafeAcceptText`.
+pub fn writeAcceptSequence(writer: *std.Io.Writer, text: []const u8, mode: AcceptMode) std.Io.Writer.Error!void {
     std.debug.assert(isSafeAcceptText(text));
-    try writer.writeAll("\x1b[7705~");
-    try percentEncode(writer, text);
+    try writer.writeAll(mode.csi());
+    try percentEncodeAll(writer, text);
     try writer.writeByte(0x07);
 }
 
@@ -202,6 +425,43 @@ pub fn writeAcceptSequence(writer: *std.Io.Writer, text: []const u8) std.Io.Writ
 /// bytes of text.
 pub fn acceptSequenceCapacity(len: usize) usize {
     return "\x1b[7705~".len + len * 3 + 1;
+}
+
+/// Sync with `ghostty_autocomplete_item_s` in ghostty.h. Strings are
+/// not NUL-terminated.
+pub const CItem = extern struct {
+    text: [*]const u8 = "",
+    text_len: usize = 0,
+    display: [*]const u8 = "",
+    display_len: usize = 0,
+    description: [*]const u8 = "",
+    description_len: usize = 0,
+    kind: u8 = 0,
+    dangerous: bool = false,
+    /// Bytes at the start of `display` that matched the typed prefix.
+    match_len: u32 = 0,
+};
+
+/// Sync with `ghostty_autocomplete_result_s` in ghostty.h.
+pub const CResult = extern struct {
+    items: [Engine.max_items]CItem = @splat(.{}),
+    count: usize = 0,
+    /// The replaced token, in characters (code points) like the 6A
+    /// cursor, and its display width in terminal cells.
+    replace_start: u32 = 0,
+    replace_len: u32 = 0,
+    replace_cols: u32 = 0,
+    generation: u64 = 0,
+};
+
+test {
+    _ = Engine;
+    _ = Spec;
+    _ = Tokenizer;
+    _ = History;
+    _ = @import("Fs.zig");
+    _ = @import("Generators.zig");
+    _ = @import("Rank.zig");
 }
 
 test "autocomplete: keymap names" {
@@ -213,7 +473,7 @@ test "autocomplete: keymap names" {
     try testing.expectEqual(Keymap.other, Keymap.fromName(""));
 }
 
-test "autocomplete: state set, clamp, clear, generation" {
+test "autocomplete: state take, clamp, clear, generation" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -221,42 +481,115 @@ test "autocomplete: state set, clamp, clear, generation" {
     defer state.deinit(alloc);
     try testing.expectEqual(@as(u64, 0), state.generation);
 
-    const u = try Update.init(alloc, "git sta", 99, "emacs", false);
-    defer u.deinit();
-    try state.set(alloc, u);
+    state.take(alloc, try Update.init(alloc, "git sta", 99, "emacs", false, 42));
     try testing.expectEqualStrings("git sta", state.buffer);
     try testing.expectEqual(@as(u32, 7), state.cursor);
     try testing.expectEqual(Keymap.emacs, state.keymap);
+    try testing.expectEqual(@as(u32, 42), state.pgid);
     try testing.expect(state.active);
     try testing.expectEqual(@as(u64, 1), state.generation);
 
-    const second = try Update.init(alloc, "ls", 1, "vicmd", true);
-    defer second.deinit();
-    try state.set(alloc, second);
+    state.take(alloc, try Update.init(alloc, "ls", 1, "vicmd", true, 42));
     try testing.expectEqualStrings("ls", state.buffer);
     try testing.expectEqual(@as(u32, 1), state.cursor);
+    try testing.expect(state.truncated);
     try testing.expectEqual(@as(u64, 2), state.generation);
 
     state.clear(alloc);
     try testing.expectEqual(@as(usize, 0), state.buffer.len);
     try testing.expect(!state.active);
+    try testing.expectEqual(@as(u32, 0), state.pgid);
     try testing.expectEqual(@as(u64, 3), state.generation);
+
+    // A deactivation owns nothing.
+    const d = Update.deactivation(alloc, .reset);
+    d.deinit();
 }
 
-test "autocomplete: rate limit" {
+test "autocomplete: stash keeps the submitted line for history" {
     const testing = std.testing;
-    var state: State = .{};
+    const alloc = testing.allocator;
 
+    var state: State = .{};
+    defer state.deinit(alloc);
+
+    state.take(alloc, try Update.init(alloc, "make test", 9, "emacs", false, 1));
+    const gen = state.generation;
+    state.stash(alloc);
+    try testing.expect(!state.active);
+    try testing.expect(state.generation != gen);
+    try testing.expectEqualStrings("make test", state.pending);
+    // A second stash with nothing live keeps the pending line.
+    state.stash(alloc);
+    try testing.expectEqualStrings("make test", state.pending);
+
+    const line = state.takePending();
+    defer alloc.free(line);
+    try testing.expectEqualStrings("make test", line);
+    try testing.expectEqual(@as(usize, 0), state.pending.len);
+
+    // Truncated buffers are never stashed; clear drops a pending line.
+    state.take(alloc, try Update.init(alloc, "x", 1, "emacs", true, 1));
+    state.stash(alloc);
+    try testing.expectEqual(@as(usize, 0), state.pending.len);
+    state.take(alloc, try Update.init(alloc, "y", 1, "emacs", false, 1));
+    state.stash(alloc);
+    state.clear(alloc);
+    try testing.expectEqual(@as(usize, 0), state.pending.len);
+}
+
+test "autocomplete: gate token, prompt state and rate limit" {
+    const testing = std.testing;
+    var gate: Gate = .{};
+    const at_input: Gate.TerminalState = .{ .primary_screen = true, .shell_integration_seen = true, .at_input = true };
     const t0: std.Io.Timestamp = .{ .nanoseconds = 0 };
+
+    // No token configured: nothing is accepted.
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check("", at_input, t0));
+
+    gate.token = Token.random(testing.io);
+    const good = gate.token.?.hex;
+    var bad = good;
+    bad[5] ^= 1;
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check(&bad, at_input, t0));
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check(good[0..31], at_input, t0));
+    try testing.expectEqual(Gate.Verdict.bad_token, gate.check("", at_input, t0));
+
+    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, .{ .primary_screen = false, .shell_integration_seen = true, .at_input = true }, t0));
+    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, .{ .primary_screen = true, .shell_integration_seen = false, .at_input = true }, t0));
+    try testing.expectEqual(Gate.Verdict.not_at_input, gate.check(&good, .{ .primary_screen = true, .shell_integration_seen = true, .at_input = false }, t0));
+
     var i: usize = 0;
     while (i < rate_limit_per_second) : (i += 1) {
-        try testing.expect(state.admit(t0));
+        try testing.expectEqual(Gate.Verdict.accept, gate.check(&good, at_input, t0));
     }
     // The 201st in the same second is dropped, as is one 999ms later.
-    try testing.expect(!state.admit(t0));
-    try testing.expect(!state.admit(.{ .nanoseconds = 999 * std.time.ns_per_ms }));
+    try testing.expectEqual(Gate.Verdict.rate_limited, gate.check(&good, at_input, t0));
+    try testing.expect(!gate.admit(.{ .nanoseconds = 999 * std.time.ns_per_ms }));
     // A new window opens after a second.
-    try testing.expect(state.admit(.{ .nanoseconds = 1000 * std.time.ns_per_ms }));
+    try testing.expect(gate.admit(.{ .nanoseconds = 1000 * std.time.ns_per_ms }));
+}
+
+test "autocomplete: token is 128-bit lowercase hex and random" {
+    const testing = std.testing;
+    const a = Token.random(testing.io);
+    const b = Token.random(testing.io);
+    for (a.hex) |c| try testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
+    try testing.expect(!std.mem.eql(u8, &a.hex, &b.hex));
+    try testing.expect(a.matches(&a.hex));
+}
+
+test "autocomplete: keys that end the line" {
+    const testing = std.testing;
+    try testing.expect(endsLine("\r"));
+    try testing.expect(endsLine("\n"));
+    try testing.expect(endsLine("\x03"));
+    try testing.expect(endsLine("\x04"));
+    try testing.expect(endsLine("\x1a"));
+    try testing.expect(endsLine("\x1b\r"));
+    try testing.expect(!endsLine("a"));
+    try testing.expect(!endsLine("\t"));
+    try testing.expect(!endsLine("\x1b[A"));
 }
 
 test "autocomplete: accept text validation" {
@@ -267,6 +600,7 @@ test "autocomplete: accept text validation" {
     try testing.expect(isSafeAcceptText("my file.txt"));
     try testing.expect(isSafeAcceptText("ünïcödé/路径"));
     try testing.expect(isSafeAcceptText("a;b%c"));
+    try testing.expect(isSafeAcceptText("emoji 🙂"));
 
     try testing.expect(!isSafeAcceptText(""));
     try testing.expect(!isSafeAcceptText("ls\n"));
@@ -277,10 +611,17 @@ test "autocomplete: accept text validation" {
     try testing.expect(!isSafeAcceptText("del\x7f"));
     try testing.expect(!isSafeAcceptText("\xc2\x85")); // C1 NEL
     try testing.expect(!isSafeAcceptText("\xff")); // invalid UTF-8
-    try testing.expect(!isSafeAcceptText("a\u{2028}b"));
-    try testing.expect(!isSafeAcceptText("a\u{2029}b"));
-    try testing.expect(!isSafeAcceptText("\u{202e}gnp.exe"));
-    try testing.expect(!isSafeAcceptText("\u{2066}x\u{2069}"));
+    try testing.expect(!isSafeAcceptText("\xed\xa0\x80")); // surrogate (invalid UTF-8)
+    try testing.expect(!isSafeAcceptText("a\u{2028}b")); // Zl
+    try testing.expect(!isSafeAcceptText("a\u{2029}b")); // Zp
+    try testing.expect(!isSafeAcceptText("\u{202e}gnp.exe")); // Cf bidi
+    try testing.expect(!isSafeAcceptText("\u{2066}x\u{2069}")); // Cf isolate
+    try testing.expect(!isSafeAcceptText("a\u{200b}b")); // Cf zero width space
+    try testing.expect(!isSafeAcceptText("a\u{feff}")); // Cf BOM
+    try testing.expect(!isSafeAcceptText("a\u{e000}")); // Co
+    try testing.expect(!isSafeAcceptText("a\u{10ffff}")); // noncharacter
+    try testing.expect(!isSafeAcceptText("a\u{fdd0}")); // noncharacter
+    try testing.expect(!isSafeAcceptText("a\u{0378}")); // Cn (unassigned)
 
     const big = try testing.allocator.alloc(u8, max_accept_bytes + 1);
     defer testing.allocator.free(big);
@@ -289,15 +630,23 @@ test "autocomplete: accept text validation" {
     try testing.expect(isSafeAcceptText(big[0..max_accept_bytes]));
 }
 
-test "autocomplete: accept sequence encoding" {
+test "autocomplete: accept sequence encodes every byte" {
     const testing = std.testing;
 
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try writeAcceptSequence(&w, "100%; done é");
-    try testing.expectEqualStrings("\x1b[7705~100%25%3B done é\x07", w.buffered());
+    try writeAcceptSequence(&w, "a%; é#", .token);
+    try testing.expectEqualStrings("\x1b[7705~%61%25%3B%20%C3%A9%23\x07", w.buffered());
+    try testing.expect(acceptSequenceCapacity(7) >= w.buffered().len);
 
-    try testing.expect(acceptSequenceCapacity(12) >= w.buffered().len);
+    // Only %, hex digits, the CSI and BEL ever appear.
+    for (w.buffered()["\x1b[7705~".len .. w.buffered().len - 1]) |c| {
+        try testing.expect(c == '%' or std.ascii.isDigit(c) or (c >= 'A' and c <= 'F'));
+    }
+
+    w = .fixed(&buf);
+    try writeAcceptSequence(&w, "git push", .line);
+    try testing.expectEqualStrings("\x1b[7706~%67%69%74%20%70%75%73%68\x07", w.buffered());
 }
 
 test "autocomplete: percent encode covers every byte the shell encodes" {

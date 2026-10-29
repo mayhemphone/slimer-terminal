@@ -805,6 +805,10 @@ pub const Application = extern struct {
             .search_total => Action.searchTotal(target, value),
             .search_selected => Action.searchSelected(target, value),
 
+            // slimer: macOS popup only for now. Silent: it fires on
+            // every keystroke at the prompt.
+            .autocomplete_update => return false,
+
             // Unimplemented
             .secure_input,
             .close_all_windows,
@@ -818,7 +822,6 @@ pub const Application = extern struct {
             .check_for_updates,
             .undo,
             .redo,
-            .autocomplete_update, // slimer: macOS popup only for now
             => {
                 log.warn("unimplemented action={}", .{action});
                 return false;

@@ -55,6 +55,11 @@ _entrypoint() {
     # 2: none of the above.
     builtin typeset -gi _ghostty_state
 
+    # slimer: take the autocomplete secret out of the environment right
+    # away so no child process inherits it. Kept in a non-exported global.
+    builtin typeset -g _ghostty_ac_token=${SLIMER_AUTOCOMPLETE_TOKEN-}
+    builtin unset SLIMER_AUTOCOMPLETE_TOKEN
+
     # Attempt to create a writable file descriptor to the TTY so that we can print
     # to the TTY later even when STDOUT is redirected. This code is fairly subtle.
     #
@@ -341,20 +346,30 @@ _ghostty_deferred_init() {
 
     # slimer: autocomplete. Report the edit buffer to the terminal with a
     # private OSC 7704 whenever it changes, and accept completions the
-    # terminal sends back as CSI 7705 ~ <percent-encoded text> BEL. See
-    # docs/slimer/AUTOCOMPLETE.md. The buffer is data only: the terminal
-    # never runs it, and the accept widget only edits LBUFFER; it never
-    # calls accept-line or inserts a newline. Requires zsh 5.3+ for the
-    # line-pre-redraw hook; older shells silently skip this.
+    # terminal sends back as CSI 7705 ~ (replace the current word) or
+    # CSI 7706 ~ (replace the whole line, for history) followed by the
+    # hex-encoded text and BEL. See docs/slimer/AUTOCOMPLETE.md. The buffer
+    # is data only: the terminal never runs it, and the accept widgets only
+    # edit LBUFFER; they never call accept-line or insert a newline. Every
+    # report carries the per-surface secret (n=) the terminal handed us in
+    # SLIMER_AUTOCOMPLETE_TOKEN, so other output can't forge one. Requires
+    # zsh 5.3+ for the line-pre-redraw hook; older shells silently skip this.
     if [[ "$GHOSTTY_SHELL_FEATURES" == *autocomplete* ]] &&
+       (( ${#_ghostty_ac_token} == 32 )) && [[ $_ghostty_ac_token != *[^0-9a-f]* ]] &&
        builtin autoload -Uz -- add-zle-hook-widget 2>/dev/null &&
+       builtin zmodload zsh/datetime 2>/dev/null &&
        is-at-least 5.3; then
       builtin typeset -g _ghostty_ac_last=
 
       # The name the main keymap is linked to (`bindkey -v` links it to
-      # viins), resolved once here because $KEYMAP reports "main".
+      # viins), because $KEYMAP reports "main". Resolved at every prompt
+      # (not every keystroke, which would fork a subshell per key).
       builtin typeset -g _ghostty_ac_main=emacs
-      [[ "$(builtin bindkey -lL main 2>/dev/null)" == *viins* ]] && _ghostty_ac_main=viins
+      _ghostty_ac_resolve_main() {
+        _ghostty_ac_main=emacs
+        [[ "$(builtin bindkey -lL main 2>/dev/null)" == *viins* ]] && _ghostty_ac_main=viins
+      }
+      _ghostty_ac_resolve_main
 
       # Percent-encode $1 into REPLY: %, ;, C0 controls and DEL become %XX
       # (uppercase hex); everything else, including UTF-8, passes through.
@@ -377,39 +392,62 @@ _ghostty_deferred_init() {
         REPLY=$s
       }
 
-      # Percent-decode $1 into REPLY. Returns 1 on a malformed escape.
+      # Decode $1, which must be nothing but %XX escapes (the terminal
+      # hex-encodes every byte), into REPLY in one pass. Returns 1 if
+      # anything else is in it.
       _ghostty_ac_decode() {
-        builtin emulate -L zsh -o no_multibyte
-        builtin local s=$1 out= hex
-        while [[ $s == *%* ]]; do
-          out+=${s%%\%*}
-          s=${s#*\%}
-          hex=${s[1,2]}
-          [[ $hex == [0-9A-Fa-f][0-9A-Fa-f] ]] || builtin return 1
-          out+=${(#):-0x$hex}
-          s=${s[3,-1]}
-        done
-        REPLY=$out$s
+        builtin emulate -L zsh -o no_multibyte -o extended_glob
+        builtin local s=$1
+        [[ $s == (%[[:xdigit:]][[:xdigit:]])# ]] || builtin return 1
+        REPLY=${s//(#b)%([[:xdigit:]][[:xdigit:]])/${(#):-0x$match[1]}}
+      }
+
+      # Returns 0 if $1 is safe to insert: no control characters, and none
+      # of the invisible or reordering characters the terminal also rejects
+      # (format characters, line/paragraph separators, private use,
+      # noncharacters). The terminal's check is authoritative; this is
+      # defense in depth for the common cases.
+      _ghostty_ac_safe() {
+        builtin emulate -L zsh
+        [[ -n $1 && $1 != *[[:cntrl:]]* ]] || builtin return 1
+        if [[ -o multibyte ]]; then
+          builtin local bad=$'[­؀-؅؜۝܏᠎​-‏ -‮⁠-⁯﻿￹-￻-﷐-﷯￾￿]'
+          [[ $1 != *${~bad}* ]] || builtin return 1
+        fi
+        builtin return 0
       }
 
       # Given LBUFFER in $1 and replacement text in $2, set REPLY to the
       # new LBUFFER: the last shell word of $1 (from ${(z)}) replaced by
       # the quoted text. The token is empty (text is appended) when $1 is
       # empty, ends in whitespace, or ends in an operator such as ; | &
-      # ( ) < >. Safe barewords go in raw; anything else is ${(q)}-quoted.
+      # ( ) < > or a redirection like 2> or 2>&1. Safe barewords go in raw
+      # (a leading ~ or ~/ stays unquoted so it still expands); anything
+      # else is ${(q)}-quoted.
       _ghostty_ac_splice() {
-        builtin emulate -L zsh
-        builtin local lbuf=$1 text=$2 word prefix
+        builtin emulate -L zsh -o extended_glob
+        builtin local lbuf=$1 text=$2 word prefix head=
+        if [[ $text == '~' || $text == '~/'* ]]; then
+          head='~'
+          text=${text#\~}
+        fi
         # Glob, not =~, so the ranges are code points in every locale.
-        [[ -n $text && $text != *[^A-Za-z0-9_./:@%+=,-]* ]] || text=${(q)text}
+        if [[ -n $text && $text == *[^A-Za-z0-9_./:@%+=,-]* ]]; then
+          text=${(q)text}
+        elif [[ -z $head && -z $text ]]; then
+          text=${(q)text}
+        fi
+        text=$head$text
         prefix=$lbuf
         if [[ -n $lbuf && $lbuf != *[[:space:]] ]]; then
           builtin local -a words
           words=(${(z)lbuf})
           word=${words[-1]}
-          # Never delete a separator or redirection operator, and only
-          # remove the word if it really is the end of LBUFFER.
-          if [[ -n ${word//[;|&()<>]/} && $lbuf == *"$word" ]]; then
+          # Never delete a separator or redirection operator (including
+          # fd forms like 2> and 2>&1), and only remove the word if it
+          # really is the end of LBUFFER.
+          if [[ -n ${word//[;|&()<>]/} && $word != [0-9]#[\<\>]* &&
+                $lbuf == *"$word" ]]; then
             prefix=${lbuf%"$word"}
           fi
         fi
@@ -434,19 +472,35 @@ _ghostty_deferred_init() {
         fi
         _ghostty_ac_encode "$buf"
         builtin print -rnu $_ghostty_fd -- \
-          $'\e]7704;v=1;c='$CURSOR';k='$key';t='$t';b='$REPLY$'\a'
+          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$';c='$CURSOR';k='$key';t='$t';b='$REPLY$'\a'
       }
 
-      _ghostty_ac_accept() {
-        builtin emulate -L zsh -o no_warn_create_global -o no_aliases
-        # Read the payload one key at a time through zle so bytes already
-        # in zle's input buffer are seen. Stop at BEL or on timeout. Past
-        # the encoded size cap (3 bytes per byte of 4096) keep draining to
-        # the BEL so leftover payload is never interpreted as keystrokes.
-        builtin local payload= c= REPLY
-        builtin local -i n=0 overflow=0
-        while builtin read -r -s -k 1 -t 0.2 c; do
-          [[ $c == $'\a' ]] && break
+      # The line editor is done with this line (accepted, interrupted or
+      # handed to another widget's editor): tell the terminal so a late
+      # accept can't land in whatever runs next.
+      _ghostty_ac_finish() {
+        _ghostty_ac_last=
+        builtin print -rnu $_ghostty_fd -- \
+          $'\e]7704;v=1;n='$_ghostty_ac_token';p='$$';d=1;c=0;k=other;t=0;b=\a'
+      }
+
+      # Read an accept payload into REPLY (decoded). Keys are read one at a
+      # time through zle so bytes already in zle's input buffer are seen.
+      # Stops at BEL; keeps draining up to an overall 1 s deadline (not a
+      # single gap), and past the size cap keeps draining to the BEL, so
+      # leftover payload is never taken as keystrokes. Returns 1 on any
+      # problem.
+      _ghostty_ac_payload() {
+        builtin local payload= c=
+        builtin local -i n=0 overflow=0 done=0
+        builtin local -F deadline=$(( EPOCHREALTIME + 1.0 ))
+        while (( EPOCHREALTIME < deadline )); do
+          builtin read -r -s -k 1 -t 0.1 c || builtin continue
+          if [[ $c == $'\a' ]]; then
+            done=1
+            break
+          fi
+          # 3 bytes per byte of 4096.
           if (( ++n > 12288 )); then
             overflow=1
             (( n > 65536 )) && break
@@ -454,26 +508,47 @@ _ghostty_deferred_init() {
           fi
           payload+=$c
         done
-        (( ! overflow )) && [[ $c == $'\a' ]] || builtin return 1
+        (( done && ! overflow )) || builtin return 1
         _ghostty_ac_decode "$payload" || builtin return 1
-        builtin local text=$REPLY
-        # Defense in depth: the terminal already rejects these.
-        [[ -n $text && $text != *[[:cntrl:]]* ]] || builtin return 1
-        _ghostty_ac_splice "$LBUFFER" "$text"
+        _ghostty_ac_safe "$REPLY" || builtin return 1
+      }
+
+      _ghostty_ac_accept() {
+        builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+        builtin local REPLY
+        _ghostty_ac_payload || builtin return 1
+        _ghostty_ac_splice "$LBUFFER" "$REPLY"
+        LBUFFER=$REPLY
+        builtin zle redisplay
+      }
+
+      # Replace the whole line with a history entry. Only when the cursor
+      # is at the end and what is typed is a prefix of the entry, so this
+      # can only extend what the user already has.
+      _ghostty_ac_accept_line() {
+        builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+        builtin local REPLY
+        _ghostty_ac_payload || builtin return 1
+        [[ -z $RBUFFER && $REPLY == "$LBUFFER"* ]] || builtin return 1
         LBUFFER=$REPLY
         builtin zle redisplay
       }
 
       builtin zle -N _ghostty_ac_accept
+      builtin zle -N _ghostty_ac_accept_line
       builtin local km
       for km in emacs viins vicmd; do
         builtin bindkey -M $km $'\e[7705~' _ghostty_ac_accept
+        builtin bindkey -M $km $'\e[7706~' _ghostty_ac_accept_line
       done
       add-zle-hook-widget line-pre-redraw _ghostty_ac_report
+      add-zle-hook-widget line-finish _ghostty_ac_finish
 
-      # A new prompt always reports, even if the buffer matches the last.
+      # A new prompt always reports, even if the buffer matches the last,
+      # and picks up a keymap change (`bindkey -v` at the prompt).
       functions[_ghostty_precmd]+="
-          _ghostty_ac_last="
+          _ghostty_ac_last=
+          _ghostty_ac_resolve_main"
     fi
 
     # Some zsh users manually run `source ~/.zshrc` in order to apply rc file

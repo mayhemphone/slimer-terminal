@@ -1,0 +1,16 @@
+// Slimer starter spec (hand-written, not from withfig/autocomplete).
+const completionSpec = {
+  name: "claude",
+  description: "Claude Code",
+  options: [
+    { name: ["-c", "--continue"], description: "Continue the most recent conversation" },
+    { name: ["-r", "--resume"], description: "Resume a conversation", args: { name: "session", isOptional: true } },
+    { name: ["-p", "--print"], description: "Print the response and exit" },
+    { name: "--model", description: "Model for the session", args: { name: "model", suggestions: ["opus", "sonnet", "haiku"] } },
+    { name: ["-h", "--help"], description: "Show help" },
+    { name: ["-v", "--version"], description: "Print the version" },
+  ],
+  args: { name: "prompt", isOptional: true },
+};
+
+export default completionSpec;
