@@ -20,16 +20,17 @@ struct SlimerStatusBarModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let position = ghostty.config.slimerStatusBar
+        let fontSize = ghostty.config.slimerStatusBarFontSize
         GeometryReader { geo in
             // Very short panes keep every row for the terminal.
-            let show = position != .hidden && SlimerStatusBar.fits(inLeafHeight: geo.size.height)
+            let show = position != .hidden && SlimerStatusBar.fits(inLeafHeight: geo.size.height, fontSize: fontSize)
             VStack(spacing: 0) {
                 if show && position == .top {
-                    bar(position)
+                    bar(position, fontSize: fontSize)
                 }
                 content
                 if show && position == .bottom {
-                    bar(position)
+                    bar(position, fontSize: fontSize)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -41,12 +42,13 @@ struct SlimerStatusBarModifier: ViewModifier {
 
     /// The bar dims with its pane, like the surface's own unfocused-split overlay,
     /// so in a stack it reads as part of the terminal above (or below), not the next one.
-    private func bar(_ position: Ghostty.Config.SlimerStatusBarPosition) -> some View {
+    private func bar(_ position: Ghostty.Config.SlimerStatusBarPosition, fontSize: CGFloat) -> some View {
         SlimerStatusBar(
             surfaceView: surfaceView,
             fallbackBackground: ghostty.config.backgroundColor,
             edge: position == .top ? .bottom : .top
         )
+        .environment(\.slimerStatusBarFontSize, fontSize)
         .overlay {
             let opacity = ghostty.config.unfocusedSplitOpacity
             if isSplit && lastFocusedSurface?.value !== surfaceView && opacity > 0 {
@@ -66,28 +68,46 @@ struct SlimerStatusBarModifier: ViewModifier {
     }
 }
 
-/// The ~22pt bar: cwd, user@host, git, last command on the left; Claude on the right.
+/// The status bar: cwd, user@host, git, last command on the left; Claude on the right.
+/// Its height follows `slimer-status-bar-font-size` (26pt at the default 13pt text).
 struct SlimerStatusBar: View {
-    static let height: CGFloat = 22
+    static let defaultFontSize: CGFloat = 13
+
+    /// Bar height for a text size: twice the text size, rounded to a whole point.
+    static func height(forFontSize fontSize: CGFloat) -> CGFloat {
+        (fontSize * 2).rounded()
+    }
+
+    /// Icons and badges are drawn a little smaller than the text.
+    static func iconSize(forFontSize fontSize: CGFloat) -> CGFloat {
+        (fontSize * 0.82).rounded()
+    }
 
     /// The bar only shows in leaves at least this many bar heights tall.
     static let minimumLeafHeightMultiple: CGFloat = 3
 
-    static func fits(inLeafHeight leafHeight: CGFloat) -> Bool {
-        leafHeight >= height * minimumLeafHeightMultiple
+    static func fits(inLeafHeight leafHeight: CGFloat, fontSize: CGFloat = defaultFontSize) -> Bool {
+        leafHeight >= height(forFontSize: fontSize) * minimumLeafHeightMultiple
     }
 
     /// Height to add to a surface's requested initial size (`window-height`)
     /// so the terminal still gets the configured rows when the bar shows.
     /// Main thread only (called from the initial-size action handler).
     static var initialHeightExtra: CGFloat {
-        initialHeightExtra(for: (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config.slimerStatusBar ?? .bottom)
+        let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config
+        return initialHeightExtra(
+            for: config?.slimerStatusBar ?? .bottom,
+            fontSize: config?.slimerStatusBarFontSize ?? defaultFontSize)
     }
 
-    static func initialHeightExtra(for position: Ghostty.Config.SlimerStatusBarPosition) -> CGFloat {
-        position == .hidden ? 0 : height
+    static func initialHeightExtra(
+        for position: Ghostty.Config.SlimerStatusBarPosition,
+        fontSize: CGFloat = defaultFontSize
+    ) -> CGFloat {
+        position == .hidden ? 0 : height(forFontSize: fontSize)
     }
 
+    @Environment(\.slimerStatusBarFontSize) private var fontSize
     @ObservedObject private var model: SlimerStatusBarModel
     private let fallbackBackground: Color
 
@@ -121,17 +141,17 @@ struct SlimerStatusBar: View {
             Spacer(minLength: 4)
             if model.isClaudeForeground {
                 Image(systemName: "sparkle")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: Self.iconSize(forFontSize: fontSize) + 1, weight: .semibold))
                     .foregroundColor(.orange)
                     .help("Claude Code is running in this terminal")
                     .accessibilityLabel("Claude Code running")
             }
             ClaudeButton(surfaceView: model.surfaceView)
         }
-        .font(.system(size: 11))
+        .font(.system(size: fontSize))
         .lineLimit(1)
         .padding(.horizontal, 6)
-        .frame(height: Self.height)
+        .frame(height: Self.height(forFontSize: fontSize))
         .frame(maxWidth: .infinity)
         .background(background.overlay(tint))
         .environment(\.colorScheme, NSColor(background).isLightColor ? .light : .dark)
@@ -203,10 +223,12 @@ struct StatusChip: View {
     let systemImage: String
     let text: String
 
+    @Environment(\.slimerStatusBarFontSize) private var fontSize
+
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: systemImage)
-                .font(.system(size: 9))
+                .font(.system(size: SlimerStatusBar.iconSize(forFontSize: fontSize)))
             Text(text)
                 .truncationMode(.head)
         }
@@ -219,14 +241,18 @@ struct StatusChip: View {
 struct GitChipLabel: View {
     let state: GitRepoState
 
+    @Environment(\.slimerStatusBarFontSize) private var fontSize
+
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: state.isDetached ? "smallcircle.filled.circle" : "arrow.triangle.branch")
-                .font(.system(size: 9))
+                .font(.system(size: SlimerStatusBar.iconSize(forFontSize: fontSize)))
             // Branch names come from the repository (untrusted); display only.
             Text(SlimerUnsafeText.sanitizedForDisplay(state.headLabel))
+                .fontWeight(.semibold)
+                .foregroundColor(.primary)
                 .truncationMode(.middle)
-                .frame(maxWidth: 180, alignment: .leading)
+                .frame(maxWidth: fontSize * 16, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)
             if state.staged > 0 { Text("+\(state.staged)").foregroundColor(.green) }
             if state.unstaged > 0 { Text("~\(state.unstaged)").foregroundColor(.yellow) }
@@ -236,13 +262,13 @@ struct GitChipLabel: View {
             if state.behind > 0 { Text("⇣\(state.behind)") }
             if state.stashCount > 0 {
                 HStack(spacing: 1) {
-                    Image(systemName: "tray.full").font(.system(size: 9))
+                    Image(systemName: "tray.full").font(.system(size: SlimerStatusBar.iconSize(forFontSize: fontSize)))
                     Text("\(state.stashCount)")
                 }
             }
             if let operation = state.operation {
                 Text(StatusBarFormatting.operationBadge(operation))
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: SlimerStatusBar.iconSize(forFontSize: fontSize), weight: .bold))
                     .foregroundColor(.orange)
             }
         }
@@ -307,5 +333,19 @@ enum SlimerStatusBarActions {
     static func openGitHub(_ url: URL?) {
         guard let url, url.scheme == "https", url.host == "github.com" else { return }
         NSWorkspace.shared.open(url)
+    }
+}
+
+// MARK: - Text size
+
+private struct SlimerStatusBarFontSizeKey: EnvironmentKey {
+    static let defaultValue: CGFloat = SlimerStatusBar.defaultFontSize
+}
+
+extension EnvironmentValues {
+    /// `slimer-status-bar-font-size`, set on the bar by ``SlimerStatusBarModifier``.
+    var slimerStatusBarFontSize: CGFloat {
+        get { self[SlimerStatusBarFontSizeKey.self] }
+        set { self[SlimerStatusBarFontSizeKey.self] = newValue }
     }
 }

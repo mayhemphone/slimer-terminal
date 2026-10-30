@@ -11,13 +11,15 @@ import SwiftUI
 struct ClaudeButton: View {
     weak var surfaceView: Ghostty.SurfaceView?
 
+    @Environment(\.slimerStatusBarFontSize) private var fontSize
+
     var body: some View {
         Menu {
             ClaudeMenuItems(surfaceView: surfaceView)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 9))
+                    .font(.system(size: SlimerStatusBar.iconSize(forFontSize: fontSize)))
                 Text("Claude")
             }
             .foregroundColor(.secondary)

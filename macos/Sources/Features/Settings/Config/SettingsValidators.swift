@@ -41,6 +41,7 @@ enum SettingsKeySpec: Equatable {
         ("background-blur", .backgroundBlur),
         ("macos-titlebar-style", .enumeration(["native", "transparent", "tabs", "hidden"])),
         ("slimer-status-bar", .enumeration(["bottom", "top", "hidden"])),
+        ("slimer-status-bar-font-size", .number(9...24)),
         // Keybinds go last so they read as one group.
         ("keybind", .keybind),
     ]

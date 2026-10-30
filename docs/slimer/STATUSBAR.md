@@ -1,11 +1,13 @@
 # Status bar (Phase 4B)
 
-A thin (22pt) bar attached to every terminal surface (each split leaf, in normal
+A thin bar (26pt at the default text size) attached to every terminal surface (each split leaf, in normal
 windows and the drawer). Code: `macos/Sources/Features/StatusBar/`, tests:
 `macos/Tests/Features/StatusBar/`. Git data comes from the Phase 4A service
 (`docs/slimer/GIT.md`).
 
 ## Config
+
+`slimer-status-bar-font-size` (default 13, clamped to 9–24; also in Settings ▸ Appearance and Git & Status Bar) sets the text size, and the bar's height follows it. The branch name is drawn in the primary text color, semibold, so it stands out from the dimmer chips.
 
 `slimer-status-bar = bottom | top | hidden` (default `bottom`), reloadable at
 runtime. Swift reads it through `Ghostty.Config.slimerStatusBar`
@@ -36,7 +38,7 @@ Claude glyph (when Claude is the foreground process) and the Claude button.
 | `src/config/Config.zig` | `slimer-status-bar` key and `SlimerStatusBar` enum. |
 
 The modifier wraps the leaf in a `VStack`, so the bar takes layout space and the
-terminal grid shrinks once by 22pt; it never overlays cells. Leaves shorter than
+terminal grid shrinks once by the bar height (twice `slimer-status-bar-font-size`); it never overlays cells. Leaves shorter than
 three bar heights hide the bar. Setting `slimer-status-bar = hidden` at runtime
 also frees each surface's model (and its git subscription). The bar's background
 follows the surface's own background (runtime OSC 11 color, else its config), so

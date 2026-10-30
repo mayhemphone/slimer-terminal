@@ -58,13 +58,23 @@ struct SlimerStatusBarModelTests {
     }
 
     @Test func barNeedsThreeBarHeights() {
-        #expect(!SlimerStatusBar.fits(inLeafHeight: SlimerStatusBar.height * 3 - 1))
-        #expect(SlimerStatusBar.fits(inLeafHeight: SlimerStatusBar.height * 3))
+        for size: CGFloat in [9, 13, 24] {
+            let height = SlimerStatusBar.height(forFontSize: size)
+            #expect(!SlimerStatusBar.fits(inLeafHeight: height * 3 - 1, fontSize: size))
+            #expect(SlimerStatusBar.fits(inLeafHeight: height * 3, fontSize: size))
+        }
+    }
+
+    @Test func barHeightScalesWithTextSize() {
+        #expect(SlimerStatusBar.height(forFontSize: 11) == 22)
+        #expect(SlimerStatusBar.height(forFontSize: 13) == 26)
+        #expect(SlimerStatusBar.height(forFontSize: 24) == 48)
+        #expect(SlimerStatusBar.iconSize(forFontSize: 13) < 13)
     }
 
     @Test func initialHeightAccountsForTheBar() {
-        #expect(SlimerStatusBar.initialHeightExtra(for: .bottom) == SlimerStatusBar.height)
-        #expect(SlimerStatusBar.initialHeightExtra(for: .top) == SlimerStatusBar.height)
-        #expect(SlimerStatusBar.initialHeightExtra(for: .hidden) == 0)
+        #expect(SlimerStatusBar.initialHeightExtra(for: .bottom, fontSize: 13) == 26)
+        #expect(SlimerStatusBar.initialHeightExtra(for: .top, fontSize: 16) == 32)
+        #expect(SlimerStatusBar.initialHeightExtra(for: .hidden, fontSize: 16) == 0)
     }
 }

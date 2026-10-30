@@ -31,6 +31,9 @@ struct AppearancePane: View {
                 ConfigPicker(store: store, title: "Status bar", key: "slimer-status-bar",
                              labels: ["bottom": "Bottom", "top": "Top", "hidden": "Hidden"],
                              fallback: "bottom")
+                ConfigSlider(store: store, title: "Status bar text size", key: "slimer-status-bar-font-size",
+                             range: 9...24, step: 1, fallback: 13,
+                             format: { "\(Int($0.rounded())) pt" })
             }
         }
         .formStyle(.grouped)

@@ -2458,6 +2458,15 @@ keybind: Keybinds = .{},
 /// Only implemented on macOS.
 @"slimer-status-bar": SlimerStatusBar = .bottom,
 
+// slimer: status bar text size.
+/// The point size of the text in the Slimer status bar. The bar's height
+/// scales with it. Values are clamped to 9 through 24.
+///
+/// This can be changed at runtime.
+///
+/// Only implemented on macOS.
+@"slimer-status-bar-font-size": f64 = 13,
+
 // slimer: hold-to-show shortcut cheat sheet. See docs/slimer/SHORTCUTS.md.
 /// The modifier key that, held down on its own for
 /// `slimer-shortcut-overlay-delay`, shows a sheet of the keyboard shortcuts
@@ -5084,6 +5093,7 @@ pub fn finalize(self: *Config) !void {
 
     // Clamp our split opacity
     self.@"unfocused-split-opacity" = @min(1.0, @max(0.15, self.@"unfocused-split-opacity"));
+    self.@"slimer-status-bar-font-size" = @min(24.0, @max(9.0, self.@"slimer-status-bar-font-size")); // slimer
 
     // Clamp our contrast
     self.@"minimum-contrast" = @min(21, @max(1, self.@"minimum-contrast"));
@@ -11723,5 +11733,29 @@ test "slimer-shortcut-overlay keys" {
         try testing.expectEqual(SlimerShortcutOverlay.ctrl, cfg.@"slimer-shortcut-overlay");
         try testing.expectEqual(@as(c_uint, 2000), cfg.@"slimer-shortcut-overlay-delay".asMilliseconds());
         try testing.expectEqual(@as(usize, 2), cfg._diagnostics.items().len);
+    }
+}
+
+// slimer: status bar text size is clamped on finalize.
+test "slimer-status-bar-font-size clamps" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.finalize();
+        try testing.expectEqual(@as(f64, 13), cfg.@"slimer-status-bar-font-size");
+    }
+    for ([_]struct { []const u8, f64 }{
+        .{ "--slimer-status-bar-font-size=4", 9 },
+        .{ "--slimer-status-bar-font-size=40", 24 },
+        .{ "--slimer-status-bar-font-size=15.5", 15.5 },
+    }) |case| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{case[0]} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expectEqual(case[1], cfg.@"slimer-status-bar-font-size");
     }
 }
